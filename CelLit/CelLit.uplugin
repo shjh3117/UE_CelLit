@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "CelLit",
+	"Description": "a simple cel style shader",
+	"Category": "Other",
+	"CreatedBy": "shjh3117",
+	"CreatedByURL": "https://github.com/shjh3117/CelLit",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "CelLit",
+			"Type": "Runtime",
+			"LoadingPhase": "Default"
+		}
+	]
+}

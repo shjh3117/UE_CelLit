@@ -1,0 +1,734 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+//------------------------------------------------------- ENUM VALUES
+
+#include "ScreenSpaceDenoise/SSDDefinitions.ush" 
+
+
+//------------------------------------------------------- CONFIGS
+
+#define DIM_APPLY_DIFFUSE_INDIRECT_SSGI					1
+#define DIM_APPLY_DIFFUSE_INDIRECT_SCREEN_PROBE_GATHER	2
+
+#ifndef SSR_TILED_COMPOSITION
+#define SSR_TILED_COMPOSITION	0
+#endif
+
+#if DIM_APPLY_DIFFUSE_INDIRECT == DIM_APPLY_DIFFUSE_INDIRECT_SSGI
+	#define CONFIG_SIGNAL_PROCESSING SIGNAL_PROCESSING_SSGI
+	#define COMPILE_SIGNAL_COLOR 1
+	#define MAX_SIGNAL_BATCH_SIZE 1
+	#define SIGNAL_ARRAY_SIZE 1
+
+	#define CONFIG_SIGNAL_INPUT_LAYOUT  SIGNAL_BUFFER_LAYOUT_SSGI_HISTORY_R11G11B10
+	#define CONFIG_INPUT_TEXTURE_COUNT 2
+
+#elif DIM_APPLY_DIFFUSE_INDIRECT == DIM_APPLY_DIFFUSE_INDIRECT_SCREEN_PROBE_GATHER
+	#define CONFIG_SIGNAL_PROCESSING SIGNAL_PROCESSING_SSGI
+	#define COMPILE_SIGNAL_COLOR_ARRAY 3
+	#define MAX_SIGNAL_BATCH_SIZE 1
+	#define SIGNAL_ARRAY_SIZE 1
+
+	#define CONFIG_SIGNAL_INPUT_LAYOUT  SIGNAL_BUFFER_LAYOUT_SSGI_HISTORY_R11G11B10
+	#define CONFIG_INPUT_TEXTURE_COUNT 4
+
+#else // !DIM_APPLY_DIFFUSE_INDIRECT
+	// NOP
+#endif // !DIM_APPLY_DIFFUSE_INDIRECT
+
+#define COMPILE_MOMENT1_ACCUMULATOR 1
+#define COMPILE_BOX_KERNEL 1
+
+#if SUBSTRATE_ENABLED && (DIM_APPLY_DIFFUSE_INDIRECT == DIM_APPLY_DIFFUSE_INDIRECT_SSGI || DIM_APPLY_DIFFUSE_INDIRECT == DIM_APPLY_DIFFUSE_INDIRECT_SCREEN_PROBE_GATHER)
+  #if SUBSTRATE_TILETYPE == 0
+	#define SUBSTRATE_FASTPATH 1
+  #elif SUBSTRATE_TILETYPE == 1
+	#define SUBSTRATE_SINGLEPATH 1
+  #elif SUBSTRATE_TILETYPE == 2
+	// COMPLEX PATH
+  #elif SUBSTRATE_TILETYPE == 3
+	// COMPLEX PATH
+	#define SUBSTRATE_COMPLEXSPECIALPATH 1
+  #else
+	#error Substrate tile type non-implemented
+  #endif
+#endif
+
+#if SUBSTRATE_ENABLED && SUBSTRATE_OPAQUE_ROUGH_REFRACTION_ENABLED
+RWTexture2D<float3> OutOpaqueRoughRefractionSceneColor;
+RWTexture2D<float3> OutSubSurfaceSceneColor;
+#endif
+
+// Remove a branch of code that is unused where TransformSignal() should always early exit.
+// SPIRV does not recognize that the code should be remove which adds an unnecessary parameter requirement.
+#define FORCE_IDENTICAL_COLOR_SPACE 1
+
+//------------------------------------------------------- INCLUDES
+
+#include "Common.ush"
+#include "SceneTextureParameters.ush"
+#include "BRDF.ush"
+#include "ShadingModels.ush"
+#include "ClearCoatCommon.ush"
+#include "FastMath.ush"
+#include "Lumen/LumenMaterial.ush"
+#include "Lumen/LumenReflectionsCombine.ush"
+#include "Substrate/Substrate.ush"
+#include "Substrate/SubstrateEvaluation.ush"
+#include "HairStrands/HairStrandsEnvironmentLightingCommon.ush"
+
+#if DIM_APPLY_DIFFUSE_INDIRECT
+
+#include "ScreenSpaceDenoise/SSDSignalFramework.ush"
+#include "ScreenSpaceDenoise/SSDSignalArray.ush"
+#include "ScreenSpaceDenoise/SSDSpatialKernel.ush"
+#include "Lumen/LumenScreenSpaceBentNormal.ush"
+
+#endif
+
+#if SSR_TILED_COMPOSITION
+#include "ScreenSpaceReflectionTileCommons.ush"
+#endif
+//------------------------------------------------------- PARAMETERS
+
+float AmbientOcclusionStaticFraction;
+uint bVisualizeDiffuseIndirect;
+
+Texture2D AmbientOcclusionTexture;
+SamplerState AmbientOcclusionSampler;
+
+
+// For Lumen we use explicit binding with texture arrays
+#if DIM_APPLY_DIFFUSE_INDIRECT == DIM_APPLY_DIFFUSE_INDIRECT_SCREEN_PROBE_GATHER
+Texture2DArray DiffuseIndirect_Lumen_0;
+Texture2DArray DiffuseIndirect_Lumen_1;
+Texture2DArray DiffuseIndirect_Lumen_2;
+Texture2DArray DiffuseIndirect_Lumen_3;
+#endif
+
+Texture2D DiffuseIndirect_Textures_0;
+
+#if CONFIG_INPUT_TEXTURE_COUNT > 1
+Texture2D DiffuseIndirect_Textures_1;
+#else
+#define DiffuseIndirect_Textures_1 DiffuseIndirect_Textures_0
+#endif
+
+#if CONFIG_INPUT_TEXTURE_COUNT > 2
+Texture2D DiffuseIndirect_Textures_2;
+#else
+#define DiffuseIndirect_Textures_2 DiffuseIndirect_Textures_0
+#endif
+
+#if CONFIG_INPUT_TEXTURE_COUNT > 3
+Texture2D DiffuseIndirect_Textures_3;
+#else
+#define DiffuseIndirect_Textures_3 DiffuseIndirect_Textures_0
+#endif
+
+#if !ENABLE_DUAL_SRC_BLENDING
+Texture2D SceneColorTexture;
+SamplerState SceneColorSampler;
+#endif
+
+RWTexture2D<float4> PassDebugOutput;
+
+uint bLumenSupportBackfaceDiffuse;
+uint bLumenReflectionInputIsSSR;
+float LumenFoliageOcclusionStrength;
+float LumenMaxAOMultibounceAlbedo;
+float LumenReflectionContrast;
+float LumenReflectionSpecularScale;
+
+#if SSR_TILED_COMPOSITION
+StructuredBuffer<uint> SSRTileMaskBuffer;
+uint2 SSRTiledViewRes;
+#endif
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Helper functions
+
+// cel
+// define gaussian kernel
+static const float GaussianKernel[5][5] = 
+{
+    { 0.003, 0.013, 0.022, 0.013, 0.003 },
+    { 0.013, 0.059, 0.097, 0.059, 0.013 },
+    { 0.022, 0.097, 0.159, 0.097, 0.022 },
+    { 0.013, 0.059, 0.097, 0.059, 0.013 },
+    { 0.003, 0.013, 0.022, 0.013, 0.003 }
+}
+
+bool ScratchPattern(float2 uv, float density, float depth) {
+	
+	const float PatternInterval = 1;
+    float gridScale = depth/PatternInterval;  
+	float2 grid = frac(float2(0.0, uv.y) * gridScale);
+	
+    density = saturate(density);
+    float centerY = 0.5;
+    float dist = pow(abs(grid.y - centerY), 6);
+    float scratchWidth = lerp(0.0f, 1.0f, density);
+    float pattern = step(dist, scratchWidth);
+    return pattern;
+}
+// cel end
+
+struct FShadingOcclusion
+{
+	float SpecularOcclusion;
+	float3 DiffuseOcclusion;
+};
+
+FShadingOcclusion GetShadingOcclusion(uint2 InPixelPos, uint InBSDFIndex, float3 V, float3 N, float Roughness, float3 DiffuseColor, float InAO)
+{
+	FShadingOcclusion Out = (FShadingOcclusion)0;
+	Out.SpecularOcclusion = 1;
+	Out.DiffuseOcclusion = 1;
+
+#if DIM_APPLY_DIFFUSE_INDIRECT == DIM_APPLY_DIFFUSE_INDIRECT_SCREEN_PROBE_GATHER
+
+  #if DIM_SCREEN_BENT_NORMAL
+	const float3 BentNormal = ScreenBentNormal[uint3(InPixelPos, InBSDFIndex)].xyz * 2 - 1;
+	const float AO = length(BentNormal);
+	Out.SpecularOcclusion = CalculateSpecularOcclusion(N, Roughness, AO, V, BentNormal);
+	Out.DiffuseOcclusion = DistantIlluminationRescale(min(DiffuseColor, LumenMaxAOMultibounceAlbedo), AO);
+  #else
+	Out.SpecularOcclusion = InAO;
+	Out.DiffuseOcclusion = InAO;
+  #endif
+
+#else
+	Out.DiffuseOcclusion = 1;
+#endif
+
+	return Out;
+}
+
+float3 AddContrastAndSpecularScale(float3 In)
+{
+	// Constrast adjustment with mid-grey as 'anchor' point so that overall exposure don't change
+	In = pow(In * (1.f / 0.18f), LumenReflectionContrast) * 0.18f;
+	return In * LumenReflectionSpecularScale;
+}
+
+float3 MixSpecularAndRoughReflections(float InRoughness, bool bHasBackfaceDiffuse, float4 SpecularReflections, float3 RoughReflections)
+{
+	const float FadeAlpha = LumenCombineReflectionsAlpha(InRoughness, bHasBackfaceDiffuse);
+
+	#if SUPPORT_LUMEN_DIRECT_LIGHTING
+	// (1 - FadeAlpha) applied during Lumen rough specular integration to allow direct lighting specular which shouldn't be lerped out
+	float3 Lighting = RoughReflections;
+	#else
+	float3 Lighting = RoughReflections * (1 - FadeAlpha);
+	#endif
+
+	if (bLumenReflectionInputIsSSR > 0)
+	{
+		// #lumen_todo: this incorrectly blends over ScreenProbeGather direct specular
+		Lighting = lerp(Lighting, SpecularReflections.rgb, SpecularReflections.a);
+	}
+	// Must branch as SpecularReflections can be uninitialized where not needed and contain NaN
+	else if (FadeAlpha > 0.0f)
+	{
+		Lighting += SpecularReflections.rgb * FadeAlpha;
+	}
+	
+	return AddContrastAndSpecularScale(Lighting);
+}
+
+float3 CombineRoughSpecular(FGBufferData GBuffer, bool bHasBackfaceDiffuse, float NoV, float4 RayTracedReflections, float3 RoughReflections, float3 SpecularColor, float3 EnvBRDF)
+{
+	float3 Lighting;
+	
+	if (GBuffer.ShadingModelID == SHADINGMODELID_CLEAR_COAT)
+	{
+		Lighting = ClearCoatLayerCombine(GBuffer, NoV, AddContrastAndSpecularScale(RayTracedReflections.xyz), AddContrastAndSpecularScale(RoughReflections), SpecularColor);
+	}
+	else
+	{
+		Lighting = MixSpecularAndRoughReflections(GBuffer.Roughness, bHasBackfaceDiffuse, RayTracedReflections, RoughReflections) * EnvBRDF;
+	}
+	return Lighting;
+}
+
+float GetSSSCheckerboadSpecularScale(uint2 PixelPos, bool bNeedsSeparateLightAccumulation)
+{
+	float SpecularScale = 1.0f;
+	if (bNeedsSeparateLightAccumulation &&
+		View.bSubsurfacePostprocessEnabled > 0 && View.bCheckerboardSubsurfaceProfileRendering > 0)
+	{
+		bool bChecker = CheckerFromPixelPos(PixelPos);
+		// Adjust for checkerboard. only apply non-diffuse lighting (including emissive) 
+		// to the specular component, otherwise lighting is applied twice
+		SpecularScale = !bChecker;
+	}
+	return SpecularScale;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// Lumen diffuse evaluation for Substrate material.
+
+#if SUBSTRATE_ENABLED
+FSubstrateDeferredLighting SubstrateIndirectLighting(
+	uint2 PixelPos,
+	FSubstrateMaterialContainer MaterialBuffer,
+	inout FSubstrateAddressing SubstrateAddressing,
+	FSubstratePixelHeader SubstratePixelHeader,
+	in float3 V,
+	in float  InAO,
+	in float3 InputDiffuseLighting,
+	in float4 InputSpecularLighting)
+{
+	FSubstrateDeferredLighting Out = GetInitialisedSubstrateDeferredLighting();
+	const FSubstrateIntegrationSettings Settings = InitSubstrateIntegrationSettings(false /*bForceFullyRough*/, Substrate.bRoughDiffuse, Substrate.PeelLayersAboveDepth, Substrate.bRoughnessTracking);
+
+	Substrate_for(uint ClosureIndex = 0, ClosureIndex < SubstratePixelHeader.ClosureCount, ++ClosureIndex)
+	{
+		const uint4 FetchCoord = uint4(PixelPos, ClosureIndex, 0);
+
+		// * Lumen integration output indirect lighting per BSDF
+		// * SSGI  integration output a single indirect lighting value for all BSDF
+	#if DIM_APPLY_DIFFUSE_INDIRECT == DIM_APPLY_DIFFUSE_INDIRECT_SCREEN_PROBE_GATHER
+		const float3 InDiffuseLighting			= DiffuseIndirect_Lumen_0.Load(FetchCoord).rgb;
+		const float3 InRoughSpecularLighting	= DiffuseIndirect_Lumen_2.Load(FetchCoord).rgb;
+		const float4 InSpecularLighting			= DiffuseIndirect_Lumen_3.Load(FetchCoord).rgba;
+	#else
+		const float3 InDiffuseLighting			= InputDiffuseLighting;
+		const float3 InRoughSpecularLighting	= InputSpecularLighting.xyz;
+		const float4 InSpecularLighting			= InputSpecularLighting;
+	#endif
+
+		FSubstrateBSDF BSDF = UnpackSubstrateBSDF(MaterialBuffer, SubstrateAddressing, SubstratePixelHeader);
+		if (bVisualizeDiffuseIndirect)
+		{
+			SubstrateSetBSDFDiffuseColor(BSDF, float3(0.18f, 0.18f, 0.18f));
+		}
+
+		// Create the BSDF context
+		FSubstrateBSDFContext SubstrateBSDFContext = SubstrateCreateBSDFContext(SubstratePixelHeader, BSDF, SubstrateAddressing, V);
+		const float3 BSDFThroughput = LuminanceWeight(SubstrateBSDFContext, BSDF);
+
+		// Evaluate environment lighting
+		FSubstrateEnvLightResult SubstrateEnvLight = SubstrateEvaluateForEnvLight(SubstrateBSDFContext, true /*bEnableSpecular*/, Settings);
+		
+		const float3 DiffuseColor = SubstrateGetBSDFDiffuseColor(BSDF);
+		const float  Roughness = SubstrateGetBSDFRoughness(BSDF);
+		const bool bHasBackfaceDiffuse = SubstrateGetBSDFType(BSDF) == SUBSTRATE_BSDF_TYPE_SLAB && BSDF.HasBackScattering();
+		const FShadingOcclusion Occlusion = GetShadingOcclusion(PixelPos, ClosureIndex, V, SubstrateBSDFContext.N, Roughness, DiffuseColor, InAO);
+
+		const float3 InGlossyLighting = MixSpecularAndRoughReflections(Roughness, bHasBackfaceDiffuse, InSpecularLighting, InRoughSpecularLighting * Occlusion.SpecularOcclusion);
+
+
+		FDirectLighting OutBSDF = (FDirectLighting)0;
+		OutBSDF.Diffuse  += BSDFThroughput * InDiffuseLighting * SubstrateEnvLight.DiffuseWeight * Occlusion.DiffuseOcclusion;
+		OutBSDF.Specular += BSDFThroughput * InGlossyLighting  * SubstrateEnvLight.SpecularWeight; // Note: Occlusion.SpecularOcclusion is only applied on the rough specular part, as in legacy path.
+
+		#if DIM_APPLY_DIFFUSE_INDIRECT == DIM_APPLY_DIFFUSE_INDIRECT_SCREEN_PROBE_GATHER
+		if (bHasBackfaceDiffuse && bLumenSupportBackfaceDiffuse > 0)
+		{
+			const float3 InBackfaceDiffuseLighting = DiffuseIndirect_Lumen_1.Load(FetchCoord).rgb;
+			OutBSDF.Diffuse  += BSDFThroughput * InBackfaceDiffuseLighting * SubstrateEnvLight.DiffuseBackFaceWeight * PI * Occlusion.DiffuseOcclusion; // Multiplied by PI as is SubstrateEnvLight.DiffuseBackFaceWeight is divided PI
+		}
+		#endif 
+
+		#if SUBSTRATE_FASTPATH==0
+		if (any(SubstrateEnvLight.SpecularHazeWeight > 0.0f))
+		{
+			const float3 InHazeGlossyLighting = MixSpecularAndRoughReflections(SubstrateEnvLight.SpecularHazeSafeRoughness, bHasBackfaceDiffuse, InSpecularLighting, InRoughSpecularLighting * Occlusion.SpecularOcclusion);
+			OutBSDF.Specular += BSDFThroughput * SubstrateEnvLight.SpecularHazeWeight * InHazeGlossyLighting; // Note: Occlusion.SpecularOcclusion is only applied on the rough specular part, as in legacy path.
+		}
+		#endif 
+
+		// SSS Checkerboard
+		OutBSDF.Specular *= GetSSSCheckerboadSpecularScale(PixelPos, SubstrateEnvLight.bPostProcessSubsurface);
+
+		FLightAccumulator Accumulator = (FLightAccumulator)0;
+		LightAccumulator_AddSplit(Accumulator, OutBSDF.Diffuse, OutBSDF.Specular, OutBSDF.Diffuse, 1.f /*CommonMultiplier*/, SubstrateEnvLight.bPostProcessSubsurface);
+		AccumulateSubstrateDeferredLighting(Out, Accumulator, SubstrateEnvLight.bPostProcessSubsurface, BSDF_GETISTOPLAYER(BSDF));
+	}
+
+	return Out;
+}
+#endif // SUBSTRATE_ENABLED
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void MainPS(
+	float4 SvPosition : SV_POSITION
+#if DIM_APPLY_DIFFUSE_INDIRECT
+#if ENABLE_DUAL_SRC_BLENDING
+	, out float4 OutAddColor      DUAL_SOURCE_BLENDING_SLOT(0) : SV_Target0
+	, out float4 OutMultiplyColor DUAL_SOURCE_BLENDING_SLOT(1) : SV_Target1
+#else
+	, out float4 OutColor 		  : SV_Target0
+#endif
+#else
+	, out float4 OutMultiplyColor : SV_Target0
+#endif
+)
+{
+	const uint2 PixelPos = uint2(SvPosition.xy);
+	const float2 SceneBufferUV = SvPositionToBufferUV(SvPosition);
+	const float2 ScreenPosition = SvPositionToScreenPosition(SvPosition).xy;
+
+	#if !ENABLE_DUAL_SRC_BLENDING && DIM_APPLY_DIFFUSE_INDIRECT
+	float4 OutAddColor = float4(0.0, 0.0, 0.0, 0.0);
+	float4 OutMultiplyColor;
+
+	const float4 SceneColor = SceneColorTexture.SampleLevel(SceneColorSampler, SceneBufferUV, 0);
+	#endif
+
+	// Sample scene textures.
+	const FLumenMaterialData Material = ReadMaterialData(PixelPos, SceneBufferUV);
+
+	// Sample the ambient occlusion that is dynamically generated every frame.
+	const float DynamicAmbientOcclusion = AmbientOcclusionTexture.SampleLevel(AmbientOcclusionSampler, SceneBufferUV, 0).r;
+
+	// Compute the final ambient occlusion to be applied. Lumen handles material AO internally.
+	float FinalAmbientOcclusion = 1.0f;
+	#if DIM_APPLY_DIFFUSE_INDIRECT != DIM_APPLY_DIFFUSE_INDIRECT_SCREEN_PROBE_GATHER
+	{
+		float AOMask = IsValid(Material);
+		FinalAmbientOcclusion = lerp(1.0f, Material.MaterialAO * DynamicAmbientOcclusion, AOMask * AmbientOcclusionStaticFraction);
+	}
+	#endif
+
+	const float3 TranslatedWorldPosition = mul(float4(GetScreenPositionForProjectionType(ScreenPosition, Material.SceneDepth), Material.SceneDepth, 1), View.ScreenToTranslatedWorld).xyz;
+
+	const float3 N = Material.WorldNormal;
+	const float3 V = -GetCameraVectorFromTranslatedWorldPosition(TranslatedWorldPosition);
+	const float NoV = saturate(dot(N, V));
+
+	// Apply diffuse indirect.
+	#if DIM_APPLY_DIFFUSE_INDIRECT
+	OutAddColor = 0;
+	{
+		FDirectLighting IndirectLighting = (FDirectLighting)0;
+
+		if (IsValid(Material))
+		{
+			float3 DiffuseIndirectLighting = 0;
+			float3 RoughSpecularIndirectLighting = 0;
+			float4 SpecularIndirectLighting = 0;
+
+			#if DIM_APPLY_DIFFUSE_INDIRECT == DIM_APPLY_DIFFUSE_INDIRECT_SCREEN_PROBE_GATHER
+				DiffuseIndirectLighting 		= DiffuseIndirect_Lumen_0.SampleLevel(GlobalPointClampedSampler, float3(SceneBufferUV, 0), 0).rgb;
+				RoughSpecularIndirectLighting 	= DiffuseIndirect_Lumen_2.SampleLevel(GlobalPointClampedSampler, float3(SceneBufferUV, 0), 0).rgb;
+				
+				// cel -shjh3117 -
+				// celize indirect light
+				if(Material.GBufferData.ShadingModelID == SHADINGMODELID_CLOTH || Material.GBufferData.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN )
+				{
+					// celize one tone	
+					float2 texSize;
+					int mipLevels;
+					DiffuseIndirect_Lumen_0.GetDimensions(texSize.x, texSize.y, mipLevels);
+					float2 texel = float2(1/texSize.x, 1/texSize.y);
+					float texelScale = 1;
+				
+					float3 AccumulatedColor = 0;
+					float weightSum = 1e-6;
+
+					// Gaussian filltering
+					for (int i = -2; i <= 2; i++) {
+						for (int j = -2; j <= 2; j++) {
+							float2 offset = float2(i, j) * texel * texelScale;
+							float kernelWeight = GaussianKernel[i + 2][j + 2];
+							float3 Color = DiffuseIndirect_Lumen_0.SampleLevel(
+								GlobalPointClampedSampler,
+								float3(SceneBufferUV + offset, 0),
+								0
+							).rgb;
+
+							uint NMGBDSMID = ReadMaterialData(PixelPos, SceneBufferUV + offset).GBufferData.ShadingModelID; // NeiMaterialGBufferDataShadingModelID
+							bool isValidPixel = step(2, NMGBDSMID);
+							AccumulatedColor += Color * kernelWeight * isValidPixel;
+							weightSum += kernelWeight * isValidPixel;
+						}
+					}
+
+					AccumulatedColor /= weightSum;
+					DiffuseIndirectLighting = AccumulatedColor;	
+
+					// tone up
+					DiffuseIndirectLighting = pow(DiffuseIndirectLighting, 0.9);	
+					
+					// celize multiple tone
+					
+					float3 DILHSV = LinearRGB_2_HSV(DiffuseIndirectLighting);
+					float Value = DILHSV.z;
+					float Multiplier = 3;
+					float Interval = 1 / Multiplier;
+					float MultValue = Value * Multiplier;
+					float FloorMultValue =  floor(MultValue);
+					float DividedValue = FloorMultValue / Multiplier;
+					bool ZeroIntensity = 1 - step(0.01, DividedValue);
+					float CelValue = DividedValue + ZeroIntensity*Value*0.5;
+					float DistanceOver = smoothstep(2048, 4096, Material.SceneDepth);
+					CelValue = (1-DistanceOver)*CelValue + DistanceOver*Value;
+					CelValue = Value * 0.5 + CelValue * 0.5;
+					DiffuseIndirectLighting = HSV_2_LinearRGB(float3(DILHSV.x, DILHSV.y, CelValue));
+					
+
+					// celize multiple tone with pattern
+					/*
+					float3 DILHSV = LinearRGB_2_HSV(DiffuseIndirectLighting);
+					float Value = DILHSV.z;
+					float Multiplier = 4;
+					float Interval = 1 / Multiplier;
+					float MultValue = Value * Multiplier;
+					float FloorMultValue =  floor(MultValue);
+					float DividedValue = FloorMultValue / Multiplier;
+					float IntervalValue = fmod(Value, Interval);
+					float NonPattern = smoothstep(0.5, 0.75, IntervalValue*Multiplier);
+					float Pattern = smoothstep(0.5, 2, IntervalValue*Multiplier);
+					bool ZeroIntensity = 1 - step(0.01, DividedValue);
+					bool CelIntensity = smoothstep(0.75, 0.75, IntervalValue*Multiplier) ;
+					float SmoothPattenIntensity = Interval * Pattern;
+					bool DiscretizedPattern =  ScratchPattern(SceneBufferUV, SmoothPattenIntensity, Material.SceneDepth);
+					float CelValue =  DiscretizedPattern*(DividedValue + Interval * NonPattern) + (1-DiscretizedPattern)*(DividedValue);	
+
+					float DistanceOver = smoothstep(512,2048, Material.SceneDepth);
+					CelValue = (1-DistanceOver)*CelValue + DistanceOver*Value;
+					CelValue = Value * 0.25 + CelValue * 0.75;
+					DiffuseIndirectLighting = HSV_2_LinearRGB(float3(DILHSV.x, DILHSV.y, CelValue));
+					*/
+				}
+
+
+
+
+				if (bLumenReflectionInputIsSSR)
+				{
+					#if SSR_TILED_COMPOSITION
+					if (IsSSRTileUsed(PixelPos, SSRTiledViewRes, SSRTileMaskBuffer))
+					#endif
+					{
+						SpecularIndirectLighting = DiffuseIndirect_Textures_3.SampleLevel(GlobalPointClampedSampler, SceneBufferUV, 0).rgba;
+					}
+				}
+				else
+				{
+					SpecularIndirectLighting = DiffuseIndirect_Lumen_3.SampleLevel(GlobalPointClampedSampler, float3(SceneBufferUV, 0), 0).rgba;
+				}
+			#else
+			{
+				// Sample the output of the denoiser.
+				FSSDKernelConfig KernelConfig = CreateKernelConfig();
+				
+				#if DEBUG_OUTPUT
+				{
+					KernelConfig.DebugPixelPosition = uint2(SvPosition.xy);
+					KernelConfig.DebugEventCounter = 0;
+				}
+				#endif
+
+				// Compile time.
+				KernelConfig.bSampleKernelCenter = true;
+				KernelConfig.BufferLayout = CONFIG_SIGNAL_INPUT_LAYOUT;
+				KernelConfig.bUnroll = true;
+
+				#if DIM_UPSCALE_DIFFUSE_INDIRECT
+				{
+					KernelConfig.SampleSet = SAMPLE_SET_2X2_BILINEAR;
+					KernelConfig.BilateralDistanceComputation = SIGNAL_WORLD_FREQUENCY_REF_METADATA_ONLY;
+					KernelConfig.WorldBluringDistanceMultiplier = 16.0;
+				
+					KernelConfig.BilateralSettings[0] = BILATERAL_POSITION_BASED(3);
+				
+					// SGPRs
+					KernelConfig.BufferSizeAndInvSize = View.BufferSizeAndInvSize * float4(0.5, 0.5, 2.0, 2.0);
+					KernelConfig.BufferBilinearUVMinMax = View.BufferBilinearUVMinMax;
+				}
+				#else
+				{
+					KernelConfig.SampleSet = SAMPLE_SET_1X1;
+					KernelConfig.bNormalizeSample = true;
+				
+					// SGPRs
+					KernelConfig.BufferSizeAndInvSize = View.BufferSizeAndInvSize;
+					KernelConfig.BufferBilinearUVMinMax = View.BufferBilinearUVMinMax;
+				}
+				#endif
+
+				// VGPRs
+				KernelConfig.BufferUV = SceneBufferUV; 
+				{
+					// SUBSTRATE_TODO: We use the top layer data, but we should resolve lighting for each BSDFs.
+					KernelConfig.CompressedRefSceneMetadata = MaterialToCompressedSceneMetadata(Material.SceneDepth, Material.WorldNormal, Material.Roughness, Material.ShadingID);
+					KernelConfig.RefBufferUV = SceneBufferUV;
+					KernelConfig.RefSceneMetadataLayout = METADATA_BUFFER_LAYOUT_DISABLED;
+				}
+				KernelConfig.HammersleySeed = Rand3DPCG16(int3(SvPosition.xy, View.StateFrameIndexMod8)).xy;
+				
+				FSSDSignalAccumulatorArray UncompressedAccumulators = CreateSignalAccumulatorArray();
+				FSSDCompressedSignalAccumulatorArray CompressedAccumulators = CompressAccumulatorArray(
+					UncompressedAccumulators, CONFIG_ACCUMULATOR_VGPR_COMPRESSION);
+
+				AccumulateKernel(
+					KernelConfig,
+					DiffuseIndirect_Textures_0,
+					DiffuseIndirect_Textures_1,
+					DiffuseIndirect_Textures_2,
+					DiffuseIndirect_Textures_3,
+					/* inout */ UncompressedAccumulators,
+					/* inout */ CompressedAccumulators);
+
+				//PassDebugOutput[uint2(SvPosition.xy)] = float4(UncompressedAccumulators.Array[0].Moment1.SampleCount, 0, 0, 0);
+
+				FSSDSignalSample Sample;
+				#if DIM_UPSCALE_DIFFUSE_INDIRECT
+					Sample = NormalizeToOneSample(UncompressedAccumulators.Array[0].Moment1);
+				#else
+					Sample = UncompressedAccumulators.Array[0].Moment1;
+				#endif
+				
+				#if DIM_APPLY_DIFFUSE_INDIRECT == DIM_APPLY_DIFFUSE_INDIRECT_SSGI
+				{
+					DiffuseIndirectLighting = Sample.SceneColor.rgb;
+				}
+				#else
+					#error Unimplemented
+				#endif
+			}
+			#endif
+
+			#if SUBSTRATE_ENABLED
+			{
+				FSubstrateAddressing SubstrateAddressing = GetSubstratePixelDataByteOffset(PixelPos, uint2(View.BufferSizeAndInvSize.xy), Substrate.MaxBytesPerPixel);
+				FSubstratePixelHeader SubstratePixelHeader = UnpackSubstrateHeaderIn(Substrate.MaterialTextureArray, SubstrateAddressing, Substrate.TopLayerTexture);
+				if (SubstratePixelHeader.GetMaterialMode() > HEADER_MATERIALMODE_NONE)
+				{
+					const FSubstrateDeferredLighting IndirectLighting_Substrate = SubstrateIndirectLighting(
+						PixelPos,
+						Substrate.MaterialTextureArray,
+						SubstrateAddressing,
+						SubstratePixelHeader,
+						V,
+						DynamicAmbientOcclusion,
+						DiffuseIndirectLighting,
+						SpecularIndirectLighting);
+
+					OutAddColor = IndirectLighting_Substrate.SceneColor;
+				#if SUBSTRATE_OPAQUE_ROUGH_REFRACTION_ENABLED
+					const uint2 OutCoord = PixelPos;
+					OutOpaqueRoughRefractionSceneColor[OutCoord] += IndirectLighting_Substrate.OpaqueRoughRefractionSceneColor;
+					OutSubSurfaceSceneColor[OutCoord] += IndirectLighting_Substrate.SubSurfaceSceneColor;
+				#endif
+				}
+			}
+			#else // SUBSTRATE_ENABLED
+			{
+			FGBufferData GBuffer = Material.GBufferData;
+
+			float3 DiffuseColor = bVisualizeDiffuseIndirect ? float3(.18f, .18f, .18f) : GBuffer.DiffuseColor;
+			float3 SpecularColor = GBuffer.SpecularColor;
+
+			#if DIM_APPLY_DIFFUSE_INDIRECT == DIM_APPLY_DIFFUSE_INDIRECT_SCREEN_PROBE_GATHER
+				RemapClearCoatDiffuseAndSpecularColor(GBuffer, NoV, DiffuseColor, SpecularColor);
+			#endif
+
+			FShadingOcclusion Occlusion = GetShadingOcclusion(PixelPos, 0 /*BSDFIndex*/, V, N, GBuffer.Roughness, GBuffer.BaseColor, DynamicAmbientOcclusion);
+
+			if (GBuffer.ShadingModelID == SHADINGMODELID_TWOSIDED_FOLIAGE || GBuffer.ShadingModelID == SHADINGMODELID_SUBSURFACE)
+			{
+				Occlusion.DiffuseOcclusion = lerp(1, Occlusion.DiffuseOcclusion, LumenFoliageOcclusionStrength);
+			}
+
+			if (GBuffer.ShadingModelID == SHADINGMODELID_HAIR)
+			{
+				float3 L = 0;
+				const float3 IndirectDiffuseColor = EvaluateEnvHair(GBuffer, V, N, L /*out*/);
+				IndirectLighting.Diffuse = DiffuseIndirectLighting * Occlusion.DiffuseOcclusion * IndirectDiffuseColor;
+				IndirectLighting.Specular = 0;
+			}
+			else
+			{
+				float3 BackfaceDiffuseIndirectLighting = 0;
+
+				if (GBuffer.ShadingModelID == SHADINGMODELID_TWOSIDED_FOLIAGE)
+				{
+					float3 SubsurfaceColor = ExtractSubsurfaceColor(GBuffer);
+
+					if (bLumenSupportBackfaceDiffuse > 0)
+					{
+						#if DIM_APPLY_DIFFUSE_INDIRECT == DIM_APPLY_DIFFUSE_INDIRECT_SCREEN_PROBE_GATHER
+						BackfaceDiffuseIndirectLighting += SubsurfaceColor * DiffuseIndirect_Lumen_1.SampleLevel(GlobalPointClampedSampler, float3(SceneBufferUV, 0), 0).rgb;
+						#else
+						BackfaceDiffuseIndirectLighting += SubsurfaceColor * DiffuseIndirect_Textures_1.SampleLevel(GlobalPointClampedSampler, SceneBufferUV, 0).rgb;
+						#endif
+					}
+					else
+					{
+						// Adding Subsurface energy to the diffuse lobe is a poor approximation when DiffuseColor is small and SubsurfaceColor is large
+						// Reduce the error by attenuating SubsurfaceColor, even though diffuse already has the 1/PI for Lambert.
+						const float PreintegratedTwoSidedBxDF = 1.0f / PI;
+						DiffuseColor += SubsurfaceColor * PreintegratedTwoSidedBxDF;
+					}
+				}
+
+				// cel -shjh3117-
+				// if (GBuffer.ShadingModelID == SHADINGMODELID_SUBSURFACE || GBuffer.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN)
+				// to
+				if (GBuffer.ShadingModelID == SHADINGMODELID_SUBSURFACE)
+				{
+					float3 SubsurfaceColor = ExtractSubsurfaceColor(GBuffer);
+					// Add subsurface energy to diffuse
+					DiffuseColor += SubsurfaceColor;
+				}
+
+				// cel -shjh3117-
+				/*
+				if (GBuffer.ShadingModelID == SHADINGMODELID_CLOTH)
+				{
+					float3 ClothFuzz = ExtractSubsurfaceColor(GBuffer);
+					DiffuseColor += ClothFuzz * GBuffer.CustomData.a;
+				}
+				*/
+
+			#if USE_ENERGY_CONSERVATION
+				FBxDFEnergyTerms SpecularEnergyTerms = ComputeGGXSpecEnergyTerms(GBuffer.Roughness, NoV, SpecularColor);
+				float3 EnvBRDFValue = SpecularEnergyTerms.E; // EnvBRDF accounting for multiple scattering when enabled
+				float EnergyPreservationFactor = ComputeEnergyPreservation(SpecularEnergyTerms);
+			#else
+				float3 EnvBRDFValue = EnvBRDF(SpecularColor, GBuffer.Roughness, NoV);
+				float EnergyPreservationFactor = 1.0;
+			#endif
+
+				IndirectLighting.Diffuse = (DiffuseIndirectLighting * DiffuseColor + BackfaceDiffuseIndirectLighting) * Occlusion.DiffuseOcclusion * EnergyPreservationFactor;
+				IndirectLighting.Transmission = 0;
+
+				#if DIM_APPLY_DIFFUSE_INDIRECT == DIM_APPLY_DIFFUSE_INDIRECT_SCREEN_PROBE_GATHER
+					RoughSpecularIndirectLighting *= Occlusion.SpecularOcclusion;
+					IndirectLighting.Specular = CombineRoughSpecular(GBuffer, HasBackfaceDiffuse(Material), NoV, SpecularIndirectLighting, RoughSpecularIndirectLighting, SpecularColor, EnvBRDFValue);
+				#else
+					IndirectLighting.Specular = AddContrastAndSpecularScale(SpecularIndirectLighting.xyz) * EnvBRDFValue;
+				#endif
+			}
+			}
+			#endif // SUBSTRATE_ENABLED
+		}
+
+		// Accumulate lighting into the final buffers
+	#if !SUBSTRATE_ENABLED
+		IndirectLighting.Specular *= GetSSSCheckerboadSpecularScale(PixelPos, Material.bNeedsSeparateLightAccumulation);
+		FLightAccumulator LightAccumulator = (FLightAccumulator)0;
+		LightAccumulator_Add(
+			LightAccumulator,
+			IndirectLighting.Diffuse + IndirectLighting.Specular,
+			IndirectLighting.Diffuse,
+			1.0f,
+			Material.bNeedsSeparateLightAccumulation);
+		OutAddColor = LightAccumulator_GetResult(LightAccumulator);
+	#endif // !SUBSTRATE_ENABLED
+
+	}
+	#endif
+
+	OutMultiplyColor = FinalAmbientOcclusion;
+
+	#if !ENABLE_DUAL_SRC_BLENDING && DIM_APPLY_DIFFUSE_INDIRECT
+	OutColor = SceneColor * OutMultiplyColor + OutAddColor;
+	#endif
+}
