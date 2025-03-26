@@ -1,0 +1,13 @@
+/NOLOGO
+/errorReport:prompt
+/MACHINE:x64
+/SUBSYSTEM:WINDOWS
+/DEF
+/NAME:"UnrealEditor-CelLit.dll"
+/IGNORE:4221
+/NODEFAULTLIB
+"C:\UnrealProjects\test10\Intermediate\Build\Win64\x64\test10Editor\Development\UnrealEd\SharedPCH.UnrealEd.Project.ValApi.Cpp20.h.obj"
+"C:\UnrealProjects\test10\Plugins\CelLit\Intermediate\Build\Win64\x64\UnrealEditor\Development\CelLit\Module.CelLit.cpp.obj"
+"C:\UnrealProjects\test10\Plugins\CelLit\Intermediate\Build\Win64\x64\UnrealEditor\Development\CelLit\CelLit.cpp.obj"
+"C:\UnrealProjects\test10\Plugins\CelLit\Intermediate\Build\Win64\x64\UnrealEditor\Development\CelLit\Default.rc2.res"
+/OUT:"C:\UnrealProjects\test10\Plugins\CelLit\Intermediate\Build\Win64\x64\UnrealEditor\Development\CelLit\UnrealEditor-CelLit.lib"

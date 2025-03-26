@@ -1,0 +1,80 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+/*=============================================================================
+VirtualShadowMaps/VirtualShadowMapTransmissionCommon.ush:
+=============================================================================*/
+#pragma once
+
+#include "../Common.ush"
+#include "../SceneTexturesCommon.ush"
+#include "../DeferredShadingCommon.ush"
+#include "../TransmissionCommon.ush"
+#include "VirtualShadowMapProjectionCommon.ush"
+#include "../Substrate/SubstrateSubsurface.ush"
+
+FSubsurfaceOpacityMFP GetSubsurfaceOpacityFromGbuffer(uint2 PixelPos)
+{
+	FSubsurfaceOpacityMFP SubsurfaceOpacityMFP = GetInitialisedSubsurfaceOpacityMFP();
+
+#if SUBSTRATE_ENABLED
+
+	FSubstrateSubsurfaceData LoadStrat = SubstrateLoadSubsurfaceData(Substrate.MaterialTextureArray, Substrate.FirstSliceStoringSubstrateSSSData, PixelPos);
+
+	// Diffusion and DiffuseProfile are not allowed to translate their MFP into opacity in order to match legacy behavior
+	SubsurfaceOpacityMFP = SubstrateGetSubsurfaceOpacityMFP(LoadStrat.Header, false /*bAllowDiffuse*/, false /*bAllowDiffuseProfile*/);
+
+#else // SUBSTRATE_ENABLED
+	FGBufferData GBufferData = GetGBufferDataUint(PixelPos);
+
+	// cel -shjh3117- 
+	// Add CLOTH SHADINGMODEL
+	// TODO: SUBSURFACE_PROFILE with fancy transmission
+	if (GBufferData.ShadingModelID == SHADINGMODELID_SUBSURFACE ||
+		GBufferData.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN ||
+		GBufferData.ShadingModelID == SHADINGMODELID_TWOSIDED_FOLIAGE ||
+		GBufferData.ShadingModelID == SHADINGMODELID_CLOTH)
+	{
+		// This clamp aligns with SubsurfaceDensityFromOpacity
+		// Various engine paths treat these subsurface materials differently
+		// even when they have Opacity = 1 in the material shader, so this is
+		// important to avoid things like backface transmission being shadowed by
+		// contact shadows and so on.
+		SubsurfaceOpacityMFP.bDataIsOpacity = true;
+		SubsurfaceOpacityMFP.Data = min(GBufferData.CustomData.a, 0.99f);
+		SubsurfaceOpacityMFP.Density = SubsurfaceDensityFromOpacity(SubsurfaceOpacityMFP.Data);
+	}
+#endif // SUBSTRATE_ENABLED
+
+	return SubsurfaceOpacityMFP;
+}
+
+/* Compute Subsurface transmission */
+float GetShadowFactorSubsurface(float ShadowFactor, float OccluderDistance, FSubsurfaceOpacityMFP SubsurfaceOpacityMFP)
+{
+	if (ShadowFactor < 1.0f)
+	{
+#if SUBSTRATE_ENABLED
+		float SSSTransmission = 1.0f;
+		if (SubsurfaceOpacityMFP.bDataIsOpacity)
+		{
+			// Opacity from subsurface profile and subsurface legacy shading model
+			SSSTransmission = GetSubSurfaceTransmission(OccluderDistance, SubsurfaceOpacityMFP.Density);
+		}
+		else
+		{
+			const float MFP = SubsurfaceOpacityMFP.Data;
+			const float Extinction = SubstrateShadowMFPToExtinction(MFP);
+			const float OpticalDepth = OccluderDistance * Extinction;
+			SSSTransmission = saturate(FastExp(-OpticalDepth));
+		}
+#else
+		// Only opacity in this path
+		float SSSTransmission = GetSubSurfaceTransmission(OccluderDistance, SubsurfaceOpacityMFP.Density);
+#endif
+
+		// NOTE: This 'square' is to compensate the ShadowMask encoding (i.e., sqrt) applied when compositing VSM to shadow mask. 
+		//       This allows to be consistent with the PCF path
+		return Square(lerp(SSSTransmission, 1, ShadowFactor));
+	}
+	return ShadowFactor;
+}

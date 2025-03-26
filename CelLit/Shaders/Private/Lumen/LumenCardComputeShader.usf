@@ -1,0 +1,260 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#define LUMEN_CARD_CAPTURE 1
+
+#include "../Common.ush"
+#include "../BRDF.ush"
+
+#define SceneTexturesStruct LumenCardPass.SceneTextures 
+#define EyeAdaptationStruct LumenCardPass
+
+#include "/Engine/Generated/Material.ush"
+#include "/Engine/Generated/VertexFactory.ush"
+
+#include "../VariableRateShading/VRSShadingRateCommon.ush"
+#include "../Nanite/NaniteShadeCommon.ush"
+#include "../MortonCode.ush"
+
+COMPILER_ALLOW_CS_DERIVATIVES
+
+#include "/Engine/Public/RootConstants.ush"
+
+uint GetShadingBin()    { return GetRootConstant0(); }
+uint GetQuadBinning()   { return GetRootConstant1(); }
+uint GetMeshPassIndex() { return GetRootConstant2(); }
+
+struct FLumenOutput
+{
+	float4 Target0;
+	float4 Target1;
+	float4 Target2;
+};
+
+void ExportPixel(const uint2 PixelPos, FLumenOutput ShadedPixel)
+{
+	LumenCardOutputs.OutTarget0[PixelPos] = ShadedPixel.Target0;
+	LumenCardOutputs.OutTarget1[PixelPos] = ShadedPixel.Target1;
+	LumenCardOutputs.OutTarget2[PixelPos] = ShadedPixel.Target2;
+}
+
+#if !IS_NANITE_PASS
+#error "Only Nanite is supported"
+#endif
+
+void ProcessPixel(const FPackedNaniteView PackedView, uint ShadingBin, const uint2 PixelPos, const float2 SVPositionXY, const uint ViewIndex)
+{
+	ResolvedView = ResolveView();
+
+	// TODO: Lumen does not appear to bind a valid view uniform buffer
+	// it's almost entirely zero-filled. Need to track this down to prevent
+	// future problems from Lumen accessing values from it.
+	ResolvedView.CullingSign = 1.0f;
+
+	FMaterialPixelParameters MaterialParameters;
+
+	FNaniteFullscreenVSToPS NaniteInterpolants = (FNaniteFullscreenVSToPS)0;
+	NaniteInterpolants.TileIndex = 0;
+
+	FVertexFactoryInterpolantsVSToPS Interpolants = (FVertexFactoryInterpolantsVSToPS)0;
+	Interpolants.ViewIndex = ViewIndex;
+
+	FNaniteView NaniteView = UnpackNaniteView(PackedView);
+	PatchViewState(NaniteView, ResolvedView);
+
+	float4 SvPosition = float4(SVPositionXY, 0.0f, 1.0f);
+	MaterialParameters = GetMaterialPixelParameters(NaniteView, Interpolants, SvPosition);
+
+	FPixelMaterialInputs PixelMaterialInputs;
+	
+	// Nanite does not support OPTIONAL_IsFrontFace, Instead, Nanite determines this in GetMaterialPixelParameters().
+	const bool bIsFrontFace = false;
+
+	{
+		float4 ScreenPosition = SvPositionToResolvedScreenPosition(SvPosition);
+		float3 TranslatedWorldPosition = SvPositionToResolvedTranslatedWorld(SvPosition);
+		CalcMaterialParametersEx(MaterialParameters, PixelMaterialInputs, SvPosition, ScreenPosition, bIsFrontFace, TranslatedWorldPosition, TranslatedWorldPosition);
+	}
+
+#if TEMPLATE_USES_SUBSTRATE
+	const float3 V = MaterialParameters.WorldNormal; // Use the normal to avoid view dependent transmittance effects when baking non directional card data.
+	const float3 L = MaterialParameters.WorldNormal;
+
+	float3 DiffuseColor  = 0;
+	float3 SpecularColor = 0;
+	float3 WorldNormal   = 0;
+	float3 Emissive      = 0;
+	float TotalCoverage  = 1.f;
+
+	// Initialise a Substrate header with normal in registers
+	FSubstrateData SubstrateData = PixelMaterialInputs.GetFrontSubstrateData();
+	FSubstratePixelHeader SubstratePixelHeader = MaterialParameters.GetFrontSubstrateHeader();
+
+  #if SUBSTRATE_OPTIMIZED_UNLIT
+
+	// Unlit BSDF goes through the SubstrateTree to support weighting operations. Technically, layering and mixing could also be supported.
+	float3	UnlitSurfaceTransmittancePreCoverage = 0.0f;
+	float3	UnlitSurfaceNormal = 0.0f;
+	SubstratePixelHeader.SubstrateUpdateTreeUnlit(
+		uint2(SvPosition.xy),
+		MaterialParameters.CameraVector,
+		SubstrateData,
+		Emissive,
+		TotalCoverage,
+		UnlitSurfaceTransmittancePreCoverage,
+		UnlitSurfaceNormal);
+
+  #else // SUBSTRATE_OPTIMIZED_UNLIT
+	SubstratePixelHeader.IrradianceAO.MaterialAO = GetMaterialAmbientOcclusion(PixelMaterialInputs);
+	
+	if (SubstratePixelHeader.SubstrateTree.BSDFCount > 0)
+	{
+		// To have better 'specular as diffuse' response, we use bForceFullyRoughAccurate which computes specular & diffuse separately. 
+		// They are both merge them manually at the end, as Lumen card stores only diffuse albedo.
+		// Match behavior in LumenHardwareRayTracingCommon.ush
+		FSubstrateIntegrationSettings Settings = InitSubstrateIntegrationSettings(true /*bForceFullyRough*/, true /*bRoughDiffuseEnabled*/, 0 /*PeelLayersAboveDepth*/, false/*bRoughnessTracking*/);
+		Settings.bForceFullyRoughAccurate = true;
+
+		float3 TotalTransmittancePreCoverage = 0;
+		SubstratePixelHeader.SubstrateUpdateTree(SubstrateData, V, Settings, TotalCoverage, TotalTransmittancePreCoverage);
+
+
+		// Extract averaged DiffuseAlbedo / SpecularColor
+		SUBSTRATE_UNROLL_N(SUBSTRATE_CLAMPED_CLOSURE_COUNT)
+		for (int BSDFIdx = 0; BSDFIdx < SubstratePixelHeader.SubstrateTree.BSDFCount; ++BSDFIdx)
+		{
+			#define CurrentBSDF SubstratePixelHeader.SubstrateTree.BSDFs[BSDFIdx]
+			if (SubstrateIsBSDFVisible(CurrentBSDF))
+			{
+				FSubstrateAddressing NullSubstrateAddressing = (FSubstrateAddressing)0;	// Fake unused in SubstrateCreateBSDFContext when using Forward inline shading
+				FSubstrateBSDFContext SubstrateBSDFContext = SubstrateCreateBSDFContext(SubstratePixelHeader, CurrentBSDF, NullSubstrateAddressing, V, L);
+				FSubstrateEnvLightResult SubstrateEnvLight = SubstrateEvaluateForEnvLight(SubstrateBSDFContext, true /*bEnableSpecular*/, Settings);
+
+				// Use LuminanceWeightV instead of LuminanceWeight(..) as we only need to weight these value with the view transmittance, not the light transmittance;
+				const float3 Weight = CurrentBSDF.LuminanceWeightV;
+
+				DiffuseColor  += Weight * (SubstrateEnvLight.DiffuseWeight + SubstrateEnvLight.DiffuseBackFaceWeight); // This is not correct, as the albedo/diffuse color can go above 1. However this is necessary to match legacy behavior.
+				SpecularColor += Weight * SubstrateEnvLight.SpecularWeight;
+				WorldNormal   += Weight * SubstrateBSDFContext.N;
+				Emissive      += Weight * CurrentBSDF.Emissive;
+
+				// Lumen card stores only diffuse albedo, so merge specular & diffuse color, 
+				// which are propertly weighted respectively to each other
+				DiffuseColor = SpecularColor + DiffuseColor;
+
+				// Note : The legacy path uses a different formulation for composition diffuse and specular color. This result in lighter albedo.
+				//        If the above formulation causes issues for legacy projects, one could re-enable the code below:
+				//  DiffuseColor  = Weight * SubstrateEnvLight.DiffuseColor;
+				//  SpecularColor = Weight * SubstrateEnvLight.SpecularColor;
+				//  EnvBRDFApproxFullyRough(DiffuseColor, SpecularColor);
+			}
+			#undef CurrentBSDF
+		}
+	}
+  #endif // SUBSTRATE_OPTIMIZED_UNLIT
+	
+	float Opacity = 1.0f;
+#if MATERIALBLENDING_ANY_TRANSLUCENT
+	Opacity = TotalCoverage > 0.5f ? 1.0f : 0.0f;
+#elif MATERIALBLENDING_MASKED
+	Opacity = GetMaterialMask(PixelMaterialInputs) >= 0.0f ? 1.0f : 0.0f;
+#endif
+
+#else // TEMPLATE_USES_SUBSTRATE
+
+	float3 BaseColor = GetMaterialBaseColor(PixelMaterialInputs);
+	float Metallic = GetMaterialMetallic(PixelMaterialInputs);
+	float Specular = GetMaterialSpecular(PixelMaterialInputs);
+	float Roughness = GetMaterialRoughness(PixelMaterialInputs);
+	float3 Emissive = GetMaterialEmissive(PixelMaterialInputs);
+	float3 WorldNormal = MaterialParameters.WorldNormal;
+
+	float Opacity = 1.0f;
+#if MATERIALBLENDING_ANY_TRANSLUCENT
+	Opacity = GetMaterialOpacity(PixelMaterialInputs) > 0.5f ? 1.0f : 0.0f;
+#elif MATERIALBLENDING_MASKED
+	Opacity = GetMaterialMask(PixelMaterialInputs) >= 0.0f ? 1.0f : 0.0f;
+#endif
+
+	float3 DiffuseColor = BaseColor - BaseColor * Metallic;
+	float3 SpecularColor = lerp(0.08f * Specular.xxx, BaseColor, Metallic.xxx);
+
+	EnvBRDFApproxFullyRough(DiffuseColor, SpecularColor);
+
+	uint ShadingModel = GetMaterialShadingModel(PixelMaterialInputs);
+
+	float3 SubsurfaceColor = 0.0f;
+	// Match the logic in BasePassPixelShader.usf. MATERIAL_SHADINGMODEL_SUBSURFACE_PROFILE and MATERIAL_SHADINGMODEL_EYE 
+	// are ignored from the following logic as the subsurface color does not contribute to them
+	// cel -shjh3117-
+#if MATERIAL_SHADINGMODEL_SUBSURFACE /*|| MATERIAL_SHADINGMODEL_PREINTEGRATED_SKIN*/ || MATERIAL_SHADINGMODEL_TWOSIDED_FOLIAGE /*|| MATERIAL_SHADINGMODEL_CLOTH*/
+	if (ShadingModel == SHADINGMODELID_SUBSURFACE /*|| ShadingModel == SHADINGMODELID_PREINTEGRATED_SKIN*/ || ShadingModel == SHADINGMODELID_TWOSIDED_FOLIAGE /*|| ShadingModel == SHADINGMODELID_CLOTH*/ )
+	{
+		float4 SubsurfaceData = GetMaterialSubsurfaceData(PixelMaterialInputs);
+		DiffuseColor += SubsurfaceData.rgb;
+	}
+#endif
+
+#endif // TEMPLATE_USES_SUBSTRATE
+
+	// Normals are stored in local card space
+	float3 CardSpaceNormal = float3(0, 0, 1);
+
+	// As of 04/06/2022 sometimes we get NaN normals from Nanite meshes with WPO
+	if (all(IsFinite(WorldNormal)))
+	{
+		WorldNormal = normalize(WorldNormal);
+		CardSpaceNormal = mul(float4(WorldNormal, 0.0f), ResolvedView.TranslatedWorldToView).xyz;
+	}
+
+	FLumenOutput ShadedPixel;
+
+	ShadedPixel.Target0 = float4(sqrt(DiffuseColor), Opacity);
+	ShadedPixel.Target1 = float4(CardSpaceNormal.xy * 0.5f + 0.5f, 0.0f, /* bValid */ 1.0f);
+	ShadedPixel.Target2 = float4(Emissive, 0.0f);
+
+	ExportPixel(PixelPos, ShadedPixel);
+}
+
+struct FLumenShadingBinMeta
+{
+	uint DataByteOffset;
+};
+
+[numthreads(64, 1, 1)]
+void Main(uint ThreadIndex : SV_GroupIndex, uint GroupID : SV_GroupID)
+{
+	const uint ShadingBin		= GetShadingBin();
+	const bool bQuadBinning		= GetQuadBinning() != 0u;
+	const uint MeshPassIndex	= GetMeshPassIndex();
+
+	const FLumenShadingBinMeta ShadingBinMeta = NaniteShading.ShadingBinData.Load<FLumenShadingBinMeta>(ShadingBin * (uint)sizeof(FLumenShadingBinMeta));
+
+	const uint PackedTile  = NaniteShading.ShadingBinData.Load(ShadingBinMeta.DataByteOffset + ((uint)sizeof(uint) * GroupID));
+	const uint  CardIndex  = BitFieldExtractU32(PackedTile, 16, 16);
+
+	const FPackedNaniteView PackedView = NaniteShading.InViews[CardIndex];
+
+	const uint  TopLeftX   = PackedView.ViewRect.x + (BitFieldExtractU32(PackedTile, 8, 0) * 8u);
+	const uint  TopLeftY   = PackedView.ViewRect.y + (BitFieldExtractU32(PackedTile, 8, 8) * 8u);
+
+	const uint2 PixelPos = uint2(TopLeftX, TopLeftY) + MortonDecode(ThreadIndex);
+	const UlongType VisPixel = NaniteShading.VisBuffer64[PixelPos];
+
+	uint DepthInt = 0;
+	uint VisibleClusterIndex = 0;
+	uint TriIndex = 0;
+	UnpackVisPixel(VisPixel, DepthInt, VisibleClusterIndex, TriIndex);
+
+	if (VisibleClusterIndex != 0xFFFFFFFF)
+	{
+		FVisibleCluster VisibleCluster = GetVisibleCluster(VisibleClusterIndex);
+		FInstanceSceneData InstanceData = GetInstanceSceneData(VisibleCluster, false);
+		FCluster ClusterData = GetCluster(VisibleCluster.PageIndex, VisibleCluster.ClusterIndex);
+		const uint PixelShadingBin = GetMaterialShadingBin(ClusterData, InstanceData.PrimitiveId, MeshPassIndex, TriIndex);
+		if (PixelShadingBin == ShadingBin)
+		{
+			const float2 SVPositionXY = float2(PixelPos) + 0.5f;
+			ProcessPixel(PackedView, ShadingBin, PixelPos, SVPositionXY, CardIndex);
+		}
+	}
+}

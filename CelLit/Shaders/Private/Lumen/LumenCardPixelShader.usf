@@ -1,0 +1,180 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#define LUMEN_CARD_CAPTURE 1
+
+#include "../Common.ush"
+#include "../BRDF.ush"
+ 
+#define SceneTexturesStruct LumenCardPass.SceneTextures 
+#define EyeAdaptationStruct LumenCardPass
+
+#include "/Engine/Generated/Material.ush"
+#include "/Engine/Generated/VertexFactory.ush"
+
+struct FLumenCardInterpolantsVSToPS
+{
+
+};
+
+void Main(
+	FVertexFactoryInterpolantsVSToPS Interpolants,
+	FLumenCardInterpolantsVSToPS PassInterpolants,
+	in INPUT_POSITION_QUALIFIERS float4 SvPosition : SV_Position		// after all interpolators
+	OPTIONAL_IsFrontFace,
+	out float4 OutTarget0 : SV_Target0,
+	out float4 OutTarget1 : SV_Target1,
+	out float4 OutTarget2 : SV_Target2)
+{
+	ResolvedView = ResolveView();
+	FMaterialPixelParameters MaterialParameters;
+	MaterialParameters = GetMaterialPixelParameters(Interpolants, SvPosition);
+
+	FPixelMaterialInputs PixelMaterialInputs;
+	
+	{
+		float4 ScreenPosition = SvPositionToResolvedScreenPosition(SvPosition);
+		float3 TranslatedWorldPosition = SvPositionToResolvedTranslatedWorld(SvPosition);
+		CalcMaterialParametersEx(MaterialParameters, PixelMaterialInputs, SvPosition, ScreenPosition, bIsFrontFace, TranslatedWorldPosition, TranslatedWorldPosition);
+	}
+
+#if TEMPLATE_USES_SUBSTRATE
+	const float3 V = MaterialParameters.WorldNormal; // Use the normal to avoid view dependent transmittance effects when baking non directional card data.
+	const float3 L = MaterialParameters.WorldNormal;
+
+	float3 DiffuseColor  = 0;
+	float3 SpecularColor = 0;
+	float3 WorldNormal   = 0;
+	float3 Emissive      = 0;
+	float TotalCoverage  = 1.f;
+
+	// Initialise a Substrate header with normal in registers
+	FSubstrateData SubstrateData = PixelMaterialInputs.GetFrontSubstrateData();
+	FSubstratePixelHeader SubstratePixelHeader = MaterialParameters.GetFrontSubstrateHeader();
+
+  #if SUBSTRATE_OPTIMIZED_UNLIT
+
+	// Unlit BSDF goes through the SubstrateTree to support weighting operations. Technically, layering and mixing could also be supported.
+	float3	UnlitSurfaceTransmittancePreCoverage = 0.0f;
+	float3	UnlitSurfaceNormal = 0.0f;
+	SubstratePixelHeader.SubstrateUpdateTreeUnlit(
+		uint2(SvPosition.xy),
+		MaterialParameters.CameraVector,
+		SubstrateData,
+		Emissive,
+		TotalCoverage,
+		UnlitSurfaceTransmittancePreCoverage,
+		UnlitSurfaceNormal);
+
+  #else // SUBSTRATE_OPTIMIZED_UNLIT
+	SubstratePixelHeader.IrradianceAO.MaterialAO = GetMaterialAmbientOcclusion(PixelMaterialInputs);
+	
+	if (SubstratePixelHeader.SubstrateTree.BSDFCount > 0)
+	{
+		// To have better 'specular as diffuse' response, we use bForceFullyRoughAccurate which computes specular & diffuse separately. 
+		// They are both merge them manually at the end, as Lumen card stores only diffuse albedo.
+		// Match behavior in LumenHardwareRayTracingCommon.ush
+		FSubstrateIntegrationSettings Settings = InitSubstrateIntegrationSettings(true /*bForceFullyRough*/, true /*bRoughDiffuseEnabled*/, 0 /*PeelLayersAboveDepth*/, false/*bRoughnessTracking*/);
+		Settings.bForceFullyRoughAccurate = true;
+
+		float3 TotalTransmittancePreCoverage = 0;
+		SubstratePixelHeader.SubstrateUpdateTree(SubstrateData, V, Settings, TotalCoverage, TotalTransmittancePreCoverage);
+
+
+		// Extract averaged DiffuseAlbedo / SpecularColor
+		SUBSTRATE_UNROLL_N(SUBSTRATE_CLAMPED_CLOSURE_COUNT)
+		for (int BSDFIdx = 0; BSDFIdx < SubstratePixelHeader.SubstrateTree.BSDFCount; ++BSDFIdx)
+		{
+			#define CurrentBSDF SubstratePixelHeader.SubstrateTree.BSDFs[BSDFIdx]
+			if (SubstrateIsBSDFVisible(CurrentBSDF))
+			{
+				FSubstrateAddressing NullSubstrateAddressing = (FSubstrateAddressing)0;	// Fake unused in SubstrateCreateBSDFContext when using Forward inline shading
+				FSubstrateBSDFContext SubstrateBSDFContext = SubstrateCreateBSDFContext(SubstratePixelHeader, CurrentBSDF, NullSubstrateAddressing, V, L);
+				FSubstrateEnvLightResult SubstrateEnvLight = SubstrateEvaluateForEnvLight(SubstrateBSDFContext, true /*bEnableSpecular*/, Settings);
+
+				// Use LuminanceWeightV instead of LuminanceWeight(..) as we only need to weight these value with the view transmittance, not the light transmittance;
+				const float3 Weight = CurrentBSDF.LuminanceWeightV;
+
+				DiffuseColor  += Weight * (SubstrateEnvLight.DiffuseWeight + SubstrateEnvLight.DiffuseBackFaceWeight); // This is not correct, as the albedo/diffuse color can go above 1. However this is necessary to match legacy behavior.
+				SpecularColor += Weight * SubstrateEnvLight.SpecularWeight;
+				WorldNormal   += Weight * SubstrateBSDFContext.N;
+				Emissive      += Weight * CurrentBSDF.Emissive;
+
+				// Lumen card stores only diffuse albedo, so merge specular & diffuse color, 
+				// which are propertly weighted respectively to each other
+				DiffuseColor = SpecularColor + DiffuseColor;
+
+				// Note : The legacy path uses a different formulation for composition diffuse and specular color. This result in lighter albedo.
+				//        If the above formulation causes issues for legacy projects, one could re-enable the code below:
+				//  DiffuseColor  = Weight * SubstrateEnvLight.DiffuseColor;
+				//  SpecularColor = Weight * SubstrateEnvLight.SpecularColor;
+				//  EnvBRDFApproxFullyRough(DiffuseColor, SpecularColor);
+			}
+			#undef CurrentBSDF
+		}
+	}
+  #endif // SUBSTRATE_OPTIMIZED_UNLIT
+	
+	float Opacity = 1.0f;
+#if MATERIALBLENDING_ANY_TRANSLUCENT
+	Opacity = TotalCoverage > 0.5f ? 1.0f : 0.0f;
+#elif MATERIALBLENDING_MASKED
+	Opacity = GetMaterialMask(PixelMaterialInputs) >= 0.0f ? 1.0f : 0.0f;
+#endif
+
+#else // TEMPLATE_USES_SUBSTRATE
+
+	float3 BaseColor = GetMaterialBaseColor(PixelMaterialInputs);
+	float Metallic = GetMaterialMetallic(PixelMaterialInputs);
+	float Specular = GetMaterialSpecular(PixelMaterialInputs);
+	float Roughness = GetMaterialRoughness(PixelMaterialInputs);
+	float3 Emissive = GetMaterialEmissive(PixelMaterialInputs);
+	float3 WorldNormal = MaterialParameters.WorldNormal;
+
+	float Opacity = 1.0f;
+#if MATERIALBLENDING_ANY_TRANSLUCENT
+	Opacity = GetMaterialOpacity(PixelMaterialInputs) > 0.5f ? 1.0f : 0.0f;
+#elif MATERIALBLENDING_MASKED
+	Opacity = GetMaterialMask(PixelMaterialInputs) >= 0.0f ? 1.0f : 0.0f;
+#endif
+
+	float3 DiffuseColor = BaseColor - BaseColor * Metallic;
+	float3 SpecularColor = lerp(0.08f * Specular.xxx, BaseColor, Metallic.xxx);
+
+	EnvBRDFApproxFullyRough(DiffuseColor, SpecularColor);
+
+	uint ShadingModel = GetMaterialShadingModel(PixelMaterialInputs);
+
+	float3 SubsurfaceColor = 0.0f;
+	// Match the logic in BasePassPixelShader.usf. MATERIAL_SHADINGMODEL_SUBSURFACE_PROFILE and MATERIAL_SHADINGMODEL_EYE 
+	// are ignored from the following logic as the subsurface color does not contribute to them.
+	// cel -shjh3117-
+#if MATERIAL_SHADINGMODEL_SUBSURFACE /*|| MATERIAL_SHADINGMODEL_PREINTEGRATED_SKIN*/ || MATERIAL_SHADINGMODEL_TWOSIDED_FOLIAGE /*|| MATERIAL_SHADINGMODEL_CLOTH*/
+	if (ShadingModel == SHADINGMODELID_SUBSURFACE /*|| ShadingModel == SHADINGMODELID_PREINTEGRATED_SKIN*/ || ShadingModel == SHADINGMODELID_TWOSIDED_FOLIAGE /*|| ShadingModel == SHADINGMODELID_CLOTH*/)
+	{
+		float4 SubsurfaceData = GetMaterialSubsurfaceData(PixelMaterialInputs);
+		DiffuseColor += SubsurfaceData.rgb;
+	}
+#endif
+
+#if MATERIAL_SHADINGMODEL_UNLIT
+	if (ShadingModel == SHADINGMODELID_UNLIT)
+	{
+		DiffuseColor = float3(0, 0, 0);
+	}
+#endif
+
+#endif // TEMPLATE_USES_SUBSTRATE
+
+	// Normals are stored in local card space
+	float3 CardSpaceNormal = float3(0.0f, 0.0f, 1.0f);
+
+	if (all(IsFinite(WorldNormal)))
+	{
+		WorldNormal = normalize(WorldNormal);
+		CardSpaceNormal = mul(float4(WorldNormal, 0.0f), ResolvedView.TranslatedWorldToView).xyz;
+	}
+
+	OutTarget0 = float4(sqrt(DiffuseColor), Opacity);
+	OutTarget1 = float4(CardSpaceNormal.xy * 0.5f + 0.5f, 0.0f, /*bValid*/ 1.0f);
+	OutTarget2 = float4(Emissive, 0.0f);
+}

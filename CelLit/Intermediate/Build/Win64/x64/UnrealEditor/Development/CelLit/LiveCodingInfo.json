@@ -1,0 +1,9 @@
+{
+	"RemapUnityFiles": 
+	{
+		"Module.CelLit.cpp.obj": [
+			"PerModuleInline.gen.cpp.obj",
+			"CelLit.cpp.obj"
+		]
+	}
+}

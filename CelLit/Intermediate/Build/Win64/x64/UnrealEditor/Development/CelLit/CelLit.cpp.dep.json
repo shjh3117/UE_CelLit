@@ -1,0 +1,14 @@
+{
+    "Version": "1.2",
+    "Data": {
+        "Source": "c:\\unrealprojects\\test10\\plugins\\cellit\\source\\cellit\\private\\cellit.cpp",
+        "ProvidedModule": "",
+        "PCH": "c:\\unrealprojects\\test10\\intermediate\\build\\win64\\x64\\test10editor\\development\\unrealed\\sharedpch.unrealed.project.valapi.cpp20.h.pch",
+        "Includes": [
+            "c:\\unrealprojects\\test10\\plugins\\cellit\\intermediate\\build\\win64\\x64\\unrealeditor\\development\\cellit\\definitions.cellit.h",
+            "c:\\unrealprojects\\test10\\plugins\\cellit\\source\\cellit\\public\\cellit.h"
+        ],
+        "ImportedModules": [],
+        "ImportedHeaderUnits": []
+    }
+}
