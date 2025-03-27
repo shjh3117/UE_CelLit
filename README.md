@@ -28,8 +28,7 @@ CelLit Shader offers the following key features:
 - **Cel Global Illumination Rendering**  
 ![image](https://github.com/user-attachments/assets/027efb89-a434-4478-89d4-94c5f97abd27)
 ![image](https://github.com/user-attachments/assets/a0974b52-36d0-41f8-9ac9-3b52ad72c7d8)
- ![Screenshot2025-01-01172558-ezgif com-resize](https://github.com/user-attachments/assets/fe3abbf7-48d6-44dc-9cdf-693a3e9100b8)  
-
+![image](https://github.com/user-attachments/assets/b4ca1fa8-d18b-43c4-b083-2c53ca3d6d0d)  
   Cartoon-like shading for surfaces lit by indirect lighting (multi-tone shading).  
   Compatible with Lumen indirect lighting (Ex. Lit by Emissive Color).  
   Noise Attenuation through Low-Frequency Filtering.  
