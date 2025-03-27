@@ -14,7 +14,8 @@ It modifies the HLSL code of the engine's preintergrated skin shading model and 
 CelLit Shader offers the following key features:   
 
 - **Cel Rendering**  
-  ![20250213-1750-15 2693118-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/3ac52842-b305-437c-bc2d-e830d6c6a541) ![image-ezgif com-resize](https://github.com/user-attachments/assets/5619a1aa-3b7e-4d6c-b600-0a16f2385a36)  
+![image](https://github.com/user-attachments/assets/66d64d91-9b88-44de-b423-08b1c2717e1e)
+![image-ezgif com-resize](https://github.com/user-attachments/assets/5619a1aa-3b7e-4d6c-b600-0a16f2385a36)  
   Cartoon-like shading for surfaces lit by direct lighting.  
   Supports Mult-tone Shading(2-10 tone).  
   Supports Shadow threshold map.  <- I implemented this using local matrices, so it adapts to all angles. It is applied not only horizontally but also vertically. but there are still some bugs.  
