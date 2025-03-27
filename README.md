@@ -1,4 +1,4 @@
-There are a few issues to be addressed. I'll fix it.
+Since it's still in development, there are a few issues to be addressed. I'll fix it.
 
 # **Custom cel-shading style shader plugin for Unreal Engine 5**
 ![Screenshot2024-12-29205635-ezgif com-resize](https://github.com/user-attachments/assets/a1398d67-b2ad-4e15-828d-f196b49f4528)
