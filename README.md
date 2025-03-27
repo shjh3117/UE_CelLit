@@ -26,7 +26,8 @@ CelLit Shader offers the following key features:
   Compatible with PBR.  
 
 - **Cel Global Illumination Rendering**  
-  ![20241231-0422-08 2373269-ezgif com-resize](https://github.com/user-attachments/assets/39da4092-d2cb-4790-83d0-4513dff94a0e) ![Screenshot2024-12-31153322-ezgif com-resize](https://github.com/user-attachments/assets/a2db7a80-8c63-4d67-89cb-20a9abf210af) ![Screenshot2025-01-01172558-ezgif com-resize](https://github.com/user-attachments/assets/fe3abbf7-48d6-44dc-9cdf-693a3e9100b8)  
+![image](https://github.com/user-attachments/assets/027efb89-a434-4478-89d4-94c5f97abd27)
+ ![Screenshot2024-12-31153322-ezgif com-resize](https://github.com/user-attachments/assets/a2db7a80-8c63-4d67-89cb-20a9abf210af) ![Screenshot2025-01-01172558-ezgif com-resize](https://github.com/user-attachments/assets/fe3abbf7-48d6-44dc-9cdf-693a3e9100b8)  
 
   Cartoon-like shading for surfaces lit by indirect lighting (multi-tone shading).  
   Compatible with Lumen indirect lighting (Ex. Lit by Emissive Color).  
