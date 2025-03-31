@@ -1,9 +1,9 @@
 Since it's still in development, there are many issues to be addressed. I'll fix it.
 
 # **Custom cel-shading style shader plugin for Unreal Engine 5**  
-https://github.com/user-attachments/assets/b1e32b11-212a-4019-8154-72a91ed1c355
+https://github.com/user-attachments/assets/b1e32b11-212a-4019-8154-72a91ed1c355  
 
-**CelLit** is a simple **cel-shading style shader** implemented in Unreal Engine 5.5.x
+**CelLit** is a simple **cel-shading style shader** implemented in Unreal Engine 5.5.x  
 
 ## View in Other Languages
 - [English](README.md)
@@ -16,6 +16,8 @@ CelLit Shader offers the following key features:
 - **Cel Rendering**  
 ![image](https://github.com/user-attachments/assets/66d64d91-9b88-44de-b423-08b1c2717e1e)
 ![image](https://github.com/user-attachments/assets/d48658db-e579-4072-a6d8-e7914df16aa8)  
+https://github.com/user-attachments/assets/feebb4b3-b46d-4bb3-b10c-05f7e7c49c16  
+
   Cartoon-like shading for surfaces lit by direct lighting.  
   Supports Mult-tone Shading(2-10 tone).  
   Supports Shadow threshold map.  <- I implemented this using local matrices, so it adapts to all angles. It is applied not only horizontally but also vertically. but there are still some bugs.  
