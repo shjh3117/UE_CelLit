@@ -16,7 +16,7 @@ CelLit Shader offers the following key features:
 - **Cel Rendering**  
 ![image](https://github.com/user-attachments/assets/66d64d91-9b88-44de-b423-08b1c2717e1e)
 ![image](https://github.com/user-attachments/assets/d48658db-e579-4072-a6d8-e7914df16aa8)  
-https://github.com/user-attachments/assets/feebb4b3-b46d-4bb3-b10c-05f7e7c49c16  
+<video src="https://github.com/user-attachments/assets/feebb4b3-b46d-4bb3-b10c-05f7e7c49c16" controls width="720">MultiTone</video>
 
   Cartoon-like shading for surfaces lit by direct lighting.  
   Supports Mult-tone Shading(2-10 tone).  
