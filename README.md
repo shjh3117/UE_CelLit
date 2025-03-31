@@ -1,7 +1,7 @@
 Since it's still in development, there are a few issues to be addressed. I'll fix it.
 
 # **Custom cel-shading style shader plugin for Unreal Engine 5**  
-![image](https://github.com/user-attachments/assets/7f6499cb-f121-48c4-b890-7fef917d15d5)
+https://github.com/user-attachments/assets/b1e32b11-212a-4019-8154-72a91ed1c355
 
 **CelLit** is a simple **cel-shading style shader** implemented in Unreal Engine 5.5.x
 
