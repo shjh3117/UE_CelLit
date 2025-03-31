@@ -757,7 +757,6 @@ FDirectLighting ClothBxDF( FGBufferData GBuffer, half3 N, half3 V, half3 L, floa
 {
 	// cel -shjh3117-
 	// Shading code
-    // Initialize the shading context (using N, V, and L)
     BxDFContext Context;
     Init( Context, N, V, L );
     SphereMaxNoH(Context, AreaLight.SphereSinAlpha, true);
@@ -765,18 +764,19 @@ FDirectLighting ClothBxDF( FGBufferData GBuffer, half3 N, half3 V, half3 L, floa
 	
 	FDirectLighting Lighting;
 	Lighting.Diffuse  = 0;
-	Lighting.Specular = AreaLight.FalloffColor * (Falloff * NoL) * step(0.5, SpecularGGX(GBuffer.Roughness, GBuffer.SpecularColor, Context, NoL, AreaLight));
-	Lighting.Transmission = 0;
 	
-	half w = GBuffer.CustomData.x;
-	half n = GBuffer.CustomData.y;
-	half WrappedDiffuse = 2 * pow(saturate((dot(N, L) + w) / (1.0f + w)), n) * (n + 1) / (2 * (1 + w));
-	half Value = WrappedDiffuse * Shadow.TransmissionThickness;
-	half Multiplier = pow(GBuffer.CustomData.z, 2) * 10;
-	half CelValue = floor(WrappedDiffuse * Shadow.TransmissionThickness * Multiplier) / Multiplier; 
+	half3 CustomData = ExtractSubsurfaceColor(GBuffer);
+	half ShadowBias = (CustomData.x - 0.5) * 2;
+	half Multiplier = CustomData.z * 100;
 
+	half Value = Shadow.TransmissionThickness * dot(N,L) * 0.5f + 0.5f + ShadowBias;
+	half CelValue = saturate(floor(Value * Multiplier) / Multiplier); 
 	Lighting.Transmission = AreaLight.FalloffColor * Falloff * CelValue * GBuffer.DiffuseColor * 1/PI;
 	
+	half SpecularIntensity = SpecularGGX(GBuffer.Roughness, GBuffer.SpecularColor, Context, NoL, AreaLight);
+    half SpecularThreshold = 0.5h;
+    half CelSpecularFactor = step(SpecularThreshold, SpecularIntensity);
+    Lighting.Specular = AreaLight.FalloffColor * Falloff * CelSpecularFactor;
 
     return Lighting;
 }

@@ -455,20 +455,22 @@ void MainPS(
 					DiffuseIndirectLighting = pow(DiffuseIndirectLighting, 0.9);	
 					
 					// celize multiple tone
-					
-					float3 DILHSV = LinearRGB_2_HSV(DiffuseIndirectLighting);
-					float Value = DILHSV.z;
-					float Multiplier = 3;
-					float Interval = 1 / Multiplier;
-					float MultValue = Value * Multiplier;
-					float FloorMultValue =  floor(MultValue);
-					float DividedValue = FloorMultValue / Multiplier;
-					bool ZeroIntensity = 1 - step(0.01, DividedValue);
-					float CelValue = DividedValue + ZeroIntensity*Value*0.5;
-					float DistanceOver = smoothstep(2048, 4096, Material.SceneDepth);
-					CelValue = (1-DistanceOver)*CelValue + DistanceOver*Value;
-					CelValue = Value * 0.5 + CelValue * 0.5;
-					DiffuseIndirectLighting = HSV_2_LinearRGB(float3(DILHSV.x, DILHSV.y, CelValue));
+					if(Material.GBufferData.ShadingModelID == SHADINGMODELID_CLOTH)
+					{
+						float3 DILHSV = LinearRGB_2_HSV(DiffuseIndirectLighting);
+						float Value = DILHSV.z;
+						float Multiplier = 3;
+						float Interval = 1 / Multiplier;
+						float MultValue = Value * Multiplier;
+						float FloorMultValue =  floor(MultValue);
+						float DividedValue = FloorMultValue / Multiplier;
+						bool ZeroIntensity = 1 - step(0.01, DividedValue);
+						float CelValue = DividedValue + ZeroIntensity*Value*0.5;
+						float DistanceOver = smoothstep(2048, 4096, Material.SceneDepth);
+						CelValue = (1-DistanceOver)*CelValue + DistanceOver*Value;
+						CelValue = Value * 0.5 + CelValue * 0.5;
+						DiffuseIndirectLighting = HSV_2_LinearRGB(float3(DILHSV.x, DILHSV.y, CelValue));
+					}
 					
 
 					// celize multiple tone with pattern
