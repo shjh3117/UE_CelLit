@@ -39,16 +39,16 @@ CelLit Shader offers the following key features:
 ## Specification
 - **Compatible Features**  
   Lumen (supports both hardware and software ray tracing)  
-  Virtual shadow maps (VSM)  
-  Physically Based Rendering (PBR)  
-    
+  Virtual shadow maps (Due to an inherent issue with VSM, when the light incidence angle is between 89 and 90 degrees, the shadow appears sliced. I was able to fix this by adjusting the ShadowBias appropriately, but it does not work well for large meshes.)  
+  Physically Based Rendering (Roughness, Metallic, Spacular, AO?)  
+
 - **Incompatible Features**  
   Shader Model 5 (SM5) and below  
   Mobile  
   Ray traced shadows
 
 ## Docs
-I'll make...
+I'll make...  
 
 ## Planned Features:  
 Improved specular  
