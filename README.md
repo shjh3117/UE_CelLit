@@ -21,8 +21,7 @@ CelLit Shader offers the following key features:
   Cartoon-like shading for surfaces lit by direct lighting.  
   Supports Mult-tone Shading(2-10 tone).  
   Supports Shadow threshold map.  <- I implemented this using local matrices, so it adapts to all angles. It is applied not only horizontally but also vertically. but there are still some bugs.  
-  Supports Virtual texure drawing to control normal.  <-- 
-  Reduces self-shadowing using opacity.  
+  Supports Virtual texure drawing to control normal.  <-- it reduces self-shadowing using opacity.  
   Compatible with all types of lighting.  
   Compatible with transmission.  
   Compatible with PBR.  
