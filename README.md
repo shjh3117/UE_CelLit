@@ -8,34 +8,31 @@ https://github.com/user-attachments/assets/b1e32b11-212a-4019-8154-72a91ed1c355
 ## View in Other Languages
 - [English](README.md)
   
-## Introduction
-This shader applies lighting effects in the cartoon of manga or animation.  
-It modifies the HLSL code of the engine's preintergrated skin shading model and cloth shading model, so requiring the engine's shader code to be replaced.  
-CelLit Shader offers the following key features:   
+## Key Features
 
-- **Cel Rendering**  
-![image](https://github.com/user-attachments/assets/66d64d91-9b88-44de-b423-08b1c2717e1e)
-![image](https://github.com/user-attachments/assets/d48658db-e579-4072-a6d8-e7914df16aa8)  
-<video src="https://github.com/user-attachments/assets/feebb4b3-b46d-4bb3-b10c-05f7e7c49c16" controls width="720">MultiTone</video>
+- **Discrete shading based on both direct and indirect lighting (Lumen)**  
+![Discrete shading based on both direct and indirect lighting 1](https://github.com/user-attachments/assets/d93cbfd2-6393-4165-b5d2-03f37d9d795b)  
+![Discrete shading based on both direct and indirect lighting 2](https://github.com/user-attachments/assets/6eaa1e6a-b6d9-4fd6-ba79-9dd8258ffd65)
 
-  Cartoon-like shading for surfaces lit by direct lighting.  
-  Supports Mult-tone Shading(2-10 tone).  
-  Supports Shadow threshold map.  <- I implemented this using local matrices, so it adapts to all angles. It is applied not only horizontally but also vertically. but there are still some bugs.  
-  Supports Virtual texure drawing to control normal.  <-- it reduces self-shadowing using opacity.  
-  Compatible with all types of lighting.  
-  Compatible with transmission.  
-  Compatible with PBR.  
+In the case of Lumen indirect lighting, the lighting result is simply divided into discrete intervals. Due to noticeable noise, the result is passed through a Gaussian kernel. Please note that any modification in this part must be made in HLSL.
 
-- **Cel Global Illumination Rendering**  
-![image](https://github.com/user-attachments/assets/027efb89-a434-4478-89d4-94c5f97abd27)
-![image](https://github.com/user-attachments/assets/a0974b52-36d0-41f8-9ac9-3b52ad72c7d8)
-![image](https://github.com/user-attachments/assets/b4ca1fa8-d18b-43c4-b083-2c53ca3d6d0d)  
-  Cartoon-like shading for surfaces lit by indirect lighting (multi-tone shading).  
-  Compatible with Lumen indirect lighting (Ex. Lit by Emissive Color).  
-  Noise Attenuation through Low-Frequency Filtering.  
-  
-- **OutLine**  
-  Provides a post-process material using Sobel filtering for edge detection.  
+- **Compatible with UE5's PBR**  
+![Compatible with UE5's PBR](https://github.com/user-attachments/assets/d86cb5d8-84e4-4a40-9272-2f369359e1f7)  
+Since only the CustomData buffer (D) in the GBuffer is modified, Unreal Engine’s built-in PBR system continues to work as expected—regardless of the final visual output.
+
+- **Specialized features for facial shading**  
+  - **Directional facial shadow map & reduction of self-shadowing artifacts**  
+![Directional shadow map](https://github.com/user-attachments/assets/431dce3e-223b-4020-a167-79e47b60366f)  
+![Self-shadowing reduction](https://github.com/user-attachments/assets/8d45bed4-11c2-4d92-9657-447f69e884ec)  
+Plugin users are required to prepare a facial shadow map. The plugin includes default shadow maps for VRoid characters. Two maps are needed: one for lighting from above, and one for lighting from below.
+
+  - **Fake Hair Shadow (using custom stencil buffer and scene capture)**  
+![Fake Hair Shadow](https://github.com/user-attachments/assets/7666c919-2f18-4045-a6ae-85f0d5874a68)  
+Due to limited buffer availability, the AO buffer was repurposed for this effect. However, if the AO map must be used, setting its maximum value to below 0.99 allows the AO functionality to work without issues. The impact on accuracy is not yet confirmed.
+
+- **A simple post-process material for outlining is provided**  
+The outline effect is based on depth detection and includes a few minor enhancements. As it is not directly related to internal rendering, you may consider replacing it with a higher-quality material if needed.
+
 
 ## Specification
 - **Compatible Features**  
@@ -56,16 +53,3 @@ Improved specular
 ~~Face shadow bug fix~~  
 Material instances for hair, eyes, etc.  
 More appropriate post-processing  
-  
-## Installation
-This shading was implemented by modifying the engine's shader code.  
-I also developed a plugin that replaces the relevant shader files. The plugin includes appropriate material assets.  
-It can be applied like a regular plugin; however, a shader rebuild is required after applying it. **(Ctrl + Shift + .)**  
-The plugin is designed to restore the original shader files when the engine shuts down. However, in case of a forced shutdown, the restoration may not occur.  
-If this happens, you can restore the files by verifying the engine through the Epic Games Launcher.  
-
-## Usage
-  Cloth Shading Model is a normal CelLit Material.  
-  Preintergrated skin Shading Model is for face shading.  
-  I recommend using /content/material/M_CelLit, and M_CelLit_face in SampleProject.  
-  The plugin contains appropriate material assets.  
