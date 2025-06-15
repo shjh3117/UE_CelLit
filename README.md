@@ -1,4 +1,5 @@
 A personal project exploring stylized rendering.
+All content has been translated by AI. Please understand any potential contextual ambiguity.
 
 # **Custom stylized shader plugin for Unreal Engine 5**  
 https://github.com/user-attachments/assets/b1e32b11-212a-4019-8154-72a91ed1c355  
