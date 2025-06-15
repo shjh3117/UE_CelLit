@@ -53,7 +53,7 @@ I'll make...
 
 ## Planned Features:  
 Improved specular  
-Face shadow bug fix  
+~~Face shadow bug fix~~  
 Material instances for hair, eyes, etc.  
 More appropriate post-processing  
   
