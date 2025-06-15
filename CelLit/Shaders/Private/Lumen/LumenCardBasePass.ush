@@ -1,42 +1,16 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
-#define LUMEN_CARD_CAPTURE 1
+#pragma  once
 
-#include "../Common.ush"
-#include "../BRDF.ush"
- 
-#define SceneTexturesStruct LumenCardPass.SceneTextures 
-#define EyeAdaptationStruct LumenCardPass
-
-#include "/Engine/Generated/Material.ush"
-#include "/Engine/Generated/VertexFactory.ush"
-
-struct FLumenCardInterpolantsVSToPS
+struct FLumenCardBasePassOutput
 {
-
+	float4 Target0;
+	float4 Target1;
+	float4 Target2;
 };
 
-void Main(
-	FVertexFactoryInterpolantsVSToPS Interpolants,
-	FLumenCardInterpolantsVSToPS PassInterpolants,
-	in INPUT_POSITION_QUALIFIERS float4 SvPosition : SV_Position		// after all interpolators
-	OPTIONAL_IsFrontFace,
-	out float4 OutTarget0 : SV_Target0,
-	out float4 OutTarget1 : SV_Target1,
-	out float4 OutTarget2 : SV_Target2)
+FLumenCardBasePassOutput LumenCardBasePass(FPixelMaterialInputs PixelMaterialInputs, FMaterialPixelParameters MaterialParameters, float4 SvPosition)
 {
-	ResolvedView = ResolveView();
-	FMaterialPixelParameters MaterialParameters;
-	MaterialParameters = GetMaterialPixelParameters(Interpolants, SvPosition);
-
-	FPixelMaterialInputs PixelMaterialInputs;
-	
-	{
-		float4 ScreenPosition = SvPositionToResolvedScreenPosition(SvPosition);
-		float3 TranslatedWorldPosition = SvPositionToResolvedTranslatedWorld(SvPosition);
-		CalcMaterialParametersEx(MaterialParameters, PixelMaterialInputs, SvPosition, ScreenPosition, bIsFrontFace, TranslatedWorldPosition, TranslatedWorldPosition);
-	}
-
 #if TEMPLATE_USES_SUBSTRATE
 	const float3 V = MaterialParameters.WorldNormal; // Use the normal to avoid view dependent transmittance effects when baking non directional card data.
 	const float3 L = MaterialParameters.WorldNormal;
@@ -96,6 +70,7 @@ void Main(
 
 				DiffuseColor  += Weight * (SubstrateEnvLight.DiffuseWeight + SubstrateEnvLight.DiffuseBackFaceWeight); // This is not correct, as the albedo/diffuse color can go above 1. However this is necessary to match legacy behavior.
 				SpecularColor += Weight * SubstrateEnvLight.SpecularWeight;
+				SpecularColor += Weight * SubstrateEnvLight.SpecularHazeWeight;
 				WorldNormal   += Weight * SubstrateBSDFContext.N;
 				Emissive      += Weight * CurrentBSDF.Emissive;
 
@@ -148,33 +123,30 @@ void Main(
 	// Match the logic in BasePassPixelShader.usf. MATERIAL_SHADINGMODEL_SUBSURFACE_PROFILE and MATERIAL_SHADINGMODEL_EYE 
 	// are ignored from the following logic as the subsurface color does not contribute to them.
 	// cel -shjh3117-
-#if MATERIAL_SHADINGMODEL_SUBSURFACE /*|| MATERIAL_SHADINGMODEL_PREINTEGRATED_SKIN*/ || MATERIAL_SHADINGMODEL_TWOSIDED_FOLIAGE /*|| MATERIAL_SHADINGMODEL_CLOTH*/
-	if (ShadingModel == SHADINGMODELID_SUBSURFACE /*|| ShadingModel == SHADINGMODELID_PREINTEGRATED_SKIN*/ || ShadingModel == SHADINGMODELID_TWOSIDED_FOLIAGE /*|| ShadingModel == SHADINGMODELID_CLOTH*/)
+	// Remove SubsurfaceData
+#if MATERIAL_SHADINGMODEL_SUBSURFACE || MATERIAL_SHADINGMODEL_TWOSIDED_FOLIAGE
+	if (ShadingModel == SHADINGMODELID_SUBSURFACE || ShadingModel == SHADINGMODELID_TWOSIDED_FOLIAGE)
 	{
 		float4 SubsurfaceData = GetMaterialSubsurfaceData(PixelMaterialInputs);
 		DiffuseColor += SubsurfaceData.rgb;
 	}
 #endif
 
-#if MATERIAL_SHADINGMODEL_UNLIT
-	if (ShadingModel == SHADINGMODELID_UNLIT)
-	{
-		DiffuseColor = float3(0, 0, 0);
-	}
-#endif
-
 #endif // TEMPLATE_USES_SUBSTRATE
 
 	// Normals are stored in local card space
-	float3 CardSpaceNormal = float3(0.0f, 0.0f, 1.0f);
+	float3 CardSpaceNormal = float3(0, 0, 1);
 
+	// As of 04/06/2022 sometimes we get NaN normals from Nanite meshes with WPO
 	if (all(IsFinite(WorldNormal)))
 	{
 		WorldNormal = normalize(WorldNormal);
 		CardSpaceNormal = mul(float4(WorldNormal, 0.0f), ResolvedView.TranslatedWorldToView).xyz;
 	}
 
-	OutTarget0 = float4(sqrt(DiffuseColor), Opacity);
-	OutTarget1 = float4(CardSpaceNormal.xy * 0.5f + 0.5f, 0.0f, /*bValid*/ 1.0f);
-	OutTarget2 = float4(Emissive, 0.0f);
+	FLumenCardBasePassOutput ShadedPixel;
+	ShadedPixel.Target0 = float4(sqrt(DiffuseColor), Opacity);
+	ShadedPixel.Target1 = float4(CardSpaceNormal.xy * 0.5f + 0.5f, 0.0f, /* bValid */ 1.0f);
+	ShadedPixel.Target2 = float4(Emissive * LumenCardPass.CachedLightingPreExposure, 0.0f);
+	return ShadedPixel;
 }

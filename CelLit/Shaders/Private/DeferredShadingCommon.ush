@@ -297,8 +297,7 @@ uint DecodeSelectiveOutputMask(float InPackedChannel)
 	return ((uint)round(InPackedChannel * (float)0xFF)) & ~SHADINGMODELID_MASK;
 }
 
-// cel
-// Add CLOTH SHADINGMODEL
+// cel -shjh3117-
 bool IsSubsurfaceModel(int ShadingModel)
 {
 	return ShadingModel == SHADINGMODELID_SUBSURFACE 
@@ -350,7 +349,7 @@ struct FGBufferData
 	// 0..1
 	half Specular;
 	// 0..1
-	half4 CustomData;
+	float4 CustomData;
 	// AO utility value
 	half GenericAO;
 	// Indirect irradiance luma
@@ -406,6 +405,15 @@ bool HasDynamicIndirectShadowCasterRepresentation(FGBufferData GBufferData)
 {
 	uint PackedAlpha = (uint)(GBufferData.PerObjectGBufferData * 3.999f);
 	return (PackedAlpha & 2) != 0;
+}
+
+bool IsFirstPerson(FGBufferData GBufferData)
+{
+#if !ALLOW_STATIC_LIGHTING
+	return (GBufferData.SelectiveOutputMask & IS_FIRST_PERSON_MASK) != 0;
+#else
+	return false;
+#endif
 }
 
 // High frequency Checkerboard pattern
@@ -469,10 +477,6 @@ float4 ComputeIndirectLightingSampleE(uint2 TracingPixelCoord, uint TracingRayIn
 		Hammersley16(TracingRayIndex, TracingRayCount, Seed0),
 		Hammersley16(TracingRayIndex, TracingRayCount, Seed1));
 }
-
-#ifndef MOBILE_HIGH_QUALITY_BRDF
-#define MOBILE_HIGH_QUALITY_BRDF 0
-#endif
 
 #if SHADING_PATH_MOBILE
 
@@ -755,7 +759,7 @@ FGBufferData MobileDecodeGBuffer(half4 InGBufferA, half4 InGBufferB, half4 InGBu
 
 #define	FRAMEBUFFER_FETCH_ACCESS (IS_MOBILE_DEFERREDSHADING_SUBPASS && PIXELSHADER && ALLOW_FRAMEBUFFER_FETCH)
 
-#if (METAL_PROFILE && FRAMEBUFFER_FETCH_ACCESS)
+#if (METAL_ES3_1_PROFILE && FRAMEBUFFER_FETCH_ACCESS)
 #include "/Engine/Public/Platform/Metal/MetalSubpassSupport.ush"
 #elif (VULKAN_PROFILE && FRAMEBUFFER_FETCH_ACCESS)
 #include "/Engine/Public/Platform/Vulkan/VulkanSubpassSupport.ush"
@@ -772,7 +776,7 @@ void MobileFetchGBuffer(in float2 UV, out half4 GBufferA, out half4 GBufferB, ou
 	#if MOBILE_EXTENDED_GBUFFER
 		GBufferD = VulkanSubpassFetch4();
 	#endif
-#elif (METAL_PROFILE && !MAC && FRAMEBUFFER_FETCH_ACCESS)
+#elif (METAL_ES3_1_PROFILE && !MAC && FRAMEBUFFER_FETCH_ACCESS)
 	GBufferA = SubpassFetchRGBA_1(); 
 	GBufferB = SubpassFetchRGBA_2(); 
 	GBufferC = SubpassFetchRGBA_3(); 
@@ -795,7 +799,7 @@ void MobileFetchGBuffer(in float2 UV, out half4 GBufferA, out half4 GBufferB, ou
 
 #if	(FRAMEBUFFER_FETCH_ACCESS && VULKAN_PROFILE)
 	SceneDepth = ConvertFromDeviceZ(VulkanSubpassDepthFetch());
-#elif (FRAMEBUFFER_FETCH_ACCESS && (USE_SCENE_DEPTH_AUX || USE_GLES_FBF_DEFERRED))
+#elif (FRAMEBUFFER_FETCH_ACCESS && !MAC && (USE_SCENE_DEPTH_AUX || USE_GLES_FBF_DEFERRED))
 	SceneDepth = ConvertFromDeviceZ(DepthbufferFetchES2());
 #else
 	SceneDepth = ConvertFromDeviceZ(Texture2DSampleLevel(MobileSceneTextures.SceneDepthTexture, MobileSceneTextures.SceneDepthTextureSampler, UV, 0).r);
@@ -995,7 +999,12 @@ FGBufferData DecodeGBufferData(
 
 	GBuffer.CustomData = HasCustomGBufferData(GBuffer.ShadingModelID) ? InGBufferD : 0;
 
+	// FirstPerson uses a bit in SelectiveOutputMask that is aliased with ZERO_PRECSHADOW_MASK when !ALLOW_STATIC_LIGHTING, so we explicitly skip this logic here.
+#if ALLOW_STATIC_LIGHTING
 	GBuffer.PrecomputedShadowFactors = !(GBuffer.SelectiveOutputMask & SKIP_PRECSHADOW_MASK) ? InGBufferE :  ((GBuffer.SelectiveOutputMask & ZERO_PRECSHADOW_MASK) ? 0 :  1);
+#else
+	GBuffer.PrecomputedShadowFactors = half(1.0f);
+#endif
 	GBuffer.CustomDepth = ConvertFromDeviceZ(CustomNativeDepth);
 	GBuffer.CustomStencil = CustomStencil;
 	GBuffer.Depth = SceneDepth;
@@ -1212,17 +1221,10 @@ FScreenSpaceData GetScreenSpaceData(float2 UV, bool bGetNormalizedNormal = true)
 // [ Jimenez et al. 2016, "Practical Realtime Strategies for Accurate Indirect Occlusion" ]
 half3 AOMultiBounce(half3 BaseColor, half AO)
 {
-	if (SHADING_PATH_MOBILE && !MOBILE_HIGH_QUALITY_BRDF)
-	{
-		return AO;
-	}
-	else
-	{
-		half3 a = 2.0404 * BaseColor - 0.3324;
-		half3 b = -4.7951 * BaseColor + 0.6417;
-		half3 c = 2.7552 * BaseColor + 0.6903;
-		return max(AO, ((AO * a + b) * AO + c) * AO);
-	}
+	half3 a = 2.0404 * BaseColor - 0.3324;
+	half3 b = -4.7951 * BaseColor + 0.6417;
+	half3 c = 2.7552 * BaseColor + 0.6903;
+	return max(AO, ((AO * a + b) * AO + c) * AO);
 }
 
 #define LIGHTING_CHANNELS_TEXTURE_DISTANCE_FIELD_REPRESENTATION_BIT 3

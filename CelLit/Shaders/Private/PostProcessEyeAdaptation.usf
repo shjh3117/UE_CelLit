@@ -101,11 +101,23 @@ float2 ComputeWeightedTextureAverageAlphaSubRegion(
 
 			float Weight = max(AdaptationWeightTexture(ScreenUV),0.05f);
 
-			RowWeight += Weight;
-
 			// Accumulate values from alpha channel.
 			float Sample = Texture.Load(int3(i, j, 0)).w;
+
+			{
+				// apply EyeAdaptation_BlackHistogramBucketInfluence using similar logic as Histogram method
+				float fBucket = saturate(Sample) * (HISTOGRAM_SIZE - 1);
+
+				// Find two discrete buckets that straddle the continuous histogram position.
+				uint Bucket0 = (uint)(fBucket);
+				if (Bucket0 == 0)
+				{
+					Weight *= EyeAdaptation_BlackHistogramBucketInfluence;
+				}
+			}
+
 			RowValue += Weight * Sample;
+			RowWeight += Weight;
 		}
 
 		Value += RowValue;
@@ -399,7 +411,7 @@ struct FExposureMaterial
 FExposureMaterial GetExposureMaterial(uint2 InPixelPos)
 {
 	FExposureMaterial Out = (FExposureMaterial)0;
-	#if SUBSTRATE_ENABLED
+	#if SUBTRATE_GBUFFER_FORMAT==1
 	{	
 		FSubstrateAddressing SubstrateAddressing = GetSubstratePixelDataByteOffset(InPixelPos, uint2(View.BufferSizeAndInvSize.xy), Substrate.MaxBytesPerPixel);
 		FSubstratePixelHeader SubstratePixelHeader = UnpackSubstrateHeaderIn(Substrate.MaterialTextureArray, SubstrateAddressing, Substrate.TopLayerTexture);
@@ -458,12 +470,10 @@ FExposureMaterial GetExposureMaterial(uint2 InPixelPos)
 		// Illuminance ~= (SceneColorLuminance - Emissive) / (DiffuseColor + SubsurfaceColor + EnvBRDF)
 		float3 Denominator = 0.f;
 		Denominator += GBufferData.DiffuseColor;
+		// cel -shjh3117-
+		// Remove SubsurfaceColor
 		if (GBufferData.ShadingModelID == SHADINGMODELID_SUBSURFACE
-			// cel -shjh3117-
-			// || GBufferData.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN
 			|| GBufferData.ShadingModelID == SHADINGMODELID_TWOSIDED_FOLIAGE
-			// cel -shjh3117-
-			// || GBufferData.ShadingModelID == SHADINGMODELID_CLOTH
 			|| GBufferData.ShadingModelID == SHADINGMODELID_EYE)
 		{
 			float3 SubsurfaceColor = ExtractSubsurfaceColor(GBufferData);
