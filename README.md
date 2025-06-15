@@ -1,8 +1,8 @@
-A personal project exploring stylized rendering.
-All content has been translated by AI. Please understand any potential contextual ambiguity.
+A personal project exploring stylized rendering.  
+All content has been translated by AI. Please understand any potential contextual ambiguity.  
 
-# **Custom stylized shader plugin for Unreal Engine 5**  
-https://github.com/user-attachments/assets/b1e32b11-212a-4019-8154-72a91ed1c355  
+# **Custom stylized shader plugin for Unreal Engine 5**
+https://github.com/user-attachments/assets/b1e32b11-212a-4019-8154-72a91ed1c355
 
 **CelLit** is a custom shader plugin developed for Unreal Engine 5.6.0, designed to support discrete shading styles for stylized rendering.
 
