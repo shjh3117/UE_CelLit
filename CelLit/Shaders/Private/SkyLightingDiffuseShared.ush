@@ -105,8 +105,7 @@ float3 SkyLightDiffuse(FGBufferData GBuffer, float AmbientOcclusion, float2 Buff
 	}
 
 	// cel -shjh3117-
-	// if (GBuffer.ShadingModelID == SHADINGMODELID_SUBSURFACE || GBuffer.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN)
-	// to
+	// Remove SubsurfaceData
 	if (GBuffer.ShadingModelID == SHADINGMODELID_SUBSURFACE)
 	{
 		float3 SubsurfaceColor = ExtractSubsurfaceColor(GBuffer);
@@ -122,15 +121,6 @@ float3 SkyLightDiffuse(FGBufferData GBuffer, float AmbientOcclusion, float2 Buff
 		DiffuseWeight = 1.0f;
 		SkyVisData.SkyDiffuseLookUpNormal = L;
 	}
-
-	// cel -shjh3117-
-	/*
-	if (GBuffer.ShadingModelID == SHADINGMODELID_CLOTH)
-	{
-		float3 ClothFuzz = ExtractSubsurfaceColor(GBuffer);
-		DiffuseColor += ClothFuzz * GBuffer.CustomData.a;
-	}
-	*/
 
 	// Compute the preconvolved incoming lighting with the bent normal direction
 	float3 DiffuseLookup = GetSkySHDiffuse(SkyVisData.SkyDiffuseLookUpNormal) * View.SkyLightColor.rgb;

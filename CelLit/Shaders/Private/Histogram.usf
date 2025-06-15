@@ -331,12 +331,10 @@ void MainAtomicCS(
 			{
 				float3 Denominator = GBufferData.DiffuseColor;
 
+				// cel -shjh3117-
+				// Remove SubsurfaceColor
 				if (GBufferData.ShadingModelID == SHADINGMODELID_SUBSURFACE
-					// cel -shjh3117-
-					// || GBufferData.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN
 					|| GBufferData.ShadingModelID == SHADINGMODELID_TWOSIDED_FOLIAGE
-					// cel -shjh3117-
-					// || GBufferData.ShadingModelID == SHADINGMODELID_CLOTH
 					|| GBufferData.ShadingModelID == SHADINGMODELID_EYE)
 				{
 					const float3 SubsurfaceColor = ExtractSubsurfaceColor(GBufferData);

@@ -73,12 +73,14 @@ float ShadowRayCast(
 	bOutHitCastContactShadow = false;
 	if (HitDistance > 0.0)
 	{
-#if SUBSTRATE_ENABLED
+#if SUBTRATE_GBUFFER_FORMAT==1
 #if SUBSTRATE_RAYCAST_ENABLED && SUBSTRATE_MATERIALCONTAINER_IS_VIEWRESOURCE
 		uint2 PixelPos = View.ViewRectMin.xy + View.ViewSizeAndInvSize.xy * HitUV;
 		FSubstrateAddressing SubstrateAddressing = GetSubstratePixelDataByteOffset(PixelPos, uint2(View.BufferSizeAndInvSize.xy), SubstrateRayCast.MaxBytesPerPixel);
 		FSubstratePixelHeader SubstratePixelHeader = UnpackSubstrateHeaderIn(SubstrateRayCast.MaterialTextureArray, SubstrateAddressing, SubstrateRayCast.TopLayerTexture);
-		bOutHitCastContactShadow = SubstratePixelHeader.DoesCastContactShadow();
+		// We check if the hit pixel has CastContactShadow, and we always exclude EYE BSDFs from there as done by CastContactShadow(SampleGBuffer) in the legacy path below.
+		// SUBSTRATE_TODO: try to move that test to GBuffer export pass (set DoesCastContactShadow = false for EYE BSDFs).
+		bOutHitCastContactShadow = SubstratePixelHeader.DoesCastContactShadow() && !SubstratePixelHeader.SubstrateGetBSDFType() == SUBSTRATE_BSDF_TYPE_EYE;
 #endif
 #else
 		FGBufferData SampleGBuffer = GetGBufferData(HitUV);
@@ -358,10 +360,11 @@ FLightAccumulator AccumulateDynamicLighting(
 		const float ContactShadowOpacity = GBuffer.CustomData.a;
 		GetShadowTerms(GBuffer.Depth, GBuffer.PrecomputedShadowFactors, GBuffer.ShadingModelID, ContactShadowOpacity,
 			LightData, TranslatedWorldPosition, L, LightAttenuation, Dither, Shadow);
+
 		// cel -shjh3117-
-		bool isSubsurface = GBuffer.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN ? 1 : 0;
-		bool isFace = 1 - step(0.3, GBuffer.CustomData.a);
-		Shadow.SurfaceShadow = max(step(0.5, Shadow.SurfaceShadow), Shadow.SurfaceShadow) * isSubsurface*isFace + Shadow.SurfaceShadow * (1 - isSubsurface*isFace);
+		if(GBuffer.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN)
+			Shadow.TransmissionShadow = step(0.5f, Shadow.TransmissionShadow);
+
 		SurfaceShadow = Shadow.SurfaceShadow;
 
 		LightAccumulator.EstimatedCost += 0.3f;		// add the cost of getting the shadow terms

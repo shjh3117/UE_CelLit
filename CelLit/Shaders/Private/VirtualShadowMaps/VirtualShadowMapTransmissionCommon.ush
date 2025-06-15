@@ -16,18 +16,18 @@ FSubsurfaceOpacityMFP GetSubsurfaceOpacityFromGbuffer(uint2 PixelPos)
 {
 	FSubsurfaceOpacityMFP SubsurfaceOpacityMFP = GetInitialisedSubsurfaceOpacityMFP();
 
-#if SUBSTRATE_ENABLED
+#if SUBTRATE_GBUFFER_FORMAT==1
 
 	FSubstrateSubsurfaceData LoadStrat = SubstrateLoadSubsurfaceData(Substrate.MaterialTextureArray, Substrate.FirstSliceStoringSubstrateSSSData, PixelPos);
 
 	// Diffusion and DiffuseProfile are not allowed to translate their MFP into opacity in order to match legacy behavior
 	SubsurfaceOpacityMFP = SubstrateGetSubsurfaceOpacityMFP(LoadStrat.Header, false /*bAllowDiffuse*/, false /*bAllowDiffuseProfile*/);
 
-#else // SUBSTRATE_ENABLED
+#else // SUBTRATE_GBUFFER_FORMAT==1
 	FGBufferData GBufferData = GetGBufferDataUint(PixelPos);
 
-	// cel -shjh3117- 
-	// Add CLOTH SHADINGMODEL
+	// cel -shjh3117-
+	// Add Profile
 	// TODO: SUBSURFACE_PROFILE with fancy transmission
 	if (GBufferData.ShadingModelID == SHADINGMODELID_SUBSURFACE ||
 		GBufferData.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN ||
@@ -43,7 +43,7 @@ FSubsurfaceOpacityMFP GetSubsurfaceOpacityFromGbuffer(uint2 PixelPos)
 		SubsurfaceOpacityMFP.Data = min(GBufferData.CustomData.a, 0.99f);
 		SubsurfaceOpacityMFP.Density = SubsurfaceDensityFromOpacity(SubsurfaceOpacityMFP.Data);
 	}
-#endif // SUBSTRATE_ENABLED
+#endif // SUBTRATE_GBUFFER_FORMAT==1
 
 	return SubsurfaceOpacityMFP;
 }
@@ -53,7 +53,7 @@ float GetShadowFactorSubsurface(float ShadowFactor, float OccluderDistance, FSub
 {
 	if (ShadowFactor < 1.0f)
 	{
-#if SUBSTRATE_ENABLED
+#if SUBTRATE_GBUFFER_FORMAT==1
 		float SSSTransmission = 1.0f;
 		if (SubsurfaceOpacityMFP.bDataIsOpacity)
 		{
