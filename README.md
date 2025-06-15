@@ -1,4 +1,4 @@
-A personal project exploring rendering.
+A personal project exploring stylized rendering.
 
 # **Custom stylized shader plugin for Unreal Engine 5**  
 https://github.com/user-attachments/assets/b1e32b11-212a-4019-8154-72a91ed1c355  
