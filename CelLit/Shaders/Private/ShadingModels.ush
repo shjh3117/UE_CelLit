@@ -923,20 +923,22 @@ FDirectLighting PreintegratedSkinBxDF( FGBufferData GBuffer, half3 N, half3 V, h
 
 	static const float PI = 3.14159265;
 
+	half3 CustomData = ExtractSubsurfaceColor(GBuffer);
+
 	float4 q = 0;
 
 	// X
-	uint codex = (uint)(GBuffer.CustomData.x * 255.0f + 0.5f);
+	uint codex = (uint)(CustomData.x * 255.0f + 0.5f);
 	q.x = float((codex >> 4) & 15) / 15.0f;
 	q.y = float(codex & 15) / 15.0f;
 
 	// Y
-	uint codey = (uint)(GBuffer.CustomData.y * 255.0f + 0.5f);
+	uint codey = (uint)(CustomData.y * 255.0f + 0.5f);
 	q.z = float((codey >> 4) & 15) / 15.0f;
 	q.w = float(codey & 15) / 15.0f;
 
 	// Z
-	uint codez = (uint)(GBuffer.CustomData.z * 255.0f + 0.5f);
+	uint codez = (uint)(CustomData.z * 255.0f + 0.5f);
 	float ShadowUpLeft    = float((codez >> 6) & 3) / 3.0f;
 	float ShadowUpRight   = float((codez >> 4) & 3) / 3.0f;
 	float ShadowDownLeft  = float((codez >> 2) & 3) / 3.0f;
@@ -946,48 +948,30 @@ FDirectLighting PreintegratedSkinBxDF( FGBufferData GBuffer, half3 N, half3 V, h
 	// Local Maxtrix
 	q = (q - 0.5f) * 2;;
 	q = normalize(q);
-    float xx = q.x * q.x;
-    float yy = q.y * q.y;
-    float zz = q.z * q.z;
-    float xy = q.x * q.y;
-    float xz = q.x * q.z;
-    float yz = q.y * q.z;
-    float wx = q.w * q.x;
-    float wy = q.w * q.y;
-    float wz = q.w * q.z;
-    float3x3 m;
-    m[0][0] = 1.0f - 2.0f * (yy + zz);
-    m[0][1] = 2.0f * (xy - wz);
-    m[0][2] = 2.0f * (xz + wy);
-    m[1][0] = 2.0f * (xy + wz);
-    m[1][1] = 1.0f - 2.0f * (xx + zz);
-    m[1][2] = 2.0f * (yz - wx);
-    m[2][0] = 2.0f * (xz - wy);
-    m[2][1] = 2.0f * (yz + wx);
-    m[2][2] = 1.0f - 2.0f * (xx + yy);  
+    float3x3 m = {
+    1 - 2 * (q.y * q.y + q.z * q.z),  2 * (q.x * q.y - q.w * q.z),      2 * (q.x * q.z + q.w * q.y),
+    2 * (q.x * q.y + q.w * q.z),      1 - 2 * (q.x * q.x + q.z * q.z),  2 * (q.y * q.z - q.w * q.x),
+    2 * (q.x * q.z - q.w * q.y),      2 * (q.y * q.z + q.w * q.x),      1 - 2 * (q.x * q.x + q.y * q.y)
+	};
 
-	// 로컬 L 벡터 구하기
+
 	float3 LocalL = normalize(mul(normalize(L), m));
 
-	// FRU 벡터 구하기
 	float3 ForwardVector = normalize(float3(0,1,0));
 	float3 RightVector = normalize(cross(ForwardVector, normalize(float3(0,0,1))));
 	float3 UpVector = normalize(cross(ForwardVector, RightVector));
 
-	// 벡터마다 내적해주기
 	float RoL = dot(RightVector, LocalL);
 	float UoL = dot(UpVector, LocalL);
 	float FoL2D = dot(ForwardVector.xy, normalize(-LocalL.xy));
-
-	// Shadow 텍스처 판단
+	
+	// Determines if the light direction, in local space, is behind the surface (i.e., between 90° and 270° from the local Z axis) for FaceForward evaluation.
 	float FaceUpShadow = RoL < 0 ? ShadowUpLeft : ShadowUpRight;
 	float FaceDownShadow = RoL < 0 ? ShadowDownLeft : ShadowDownRight;
 	float FaceShadow = UoL < 0 ? FaceUpShadow : FaceDownShadow;
 
-	// Shadow 그리기
 	float ShadowValue = step(max(0.0001, FoL2D), FaceShadow);
 
-	// Hair Shadow
 	float HairShadow = 1 - step(1.0f, GBuffer.GBufferAO);
 
 	Lighting.Transmission  = ShadowValue * AreaLight.FalloffColor * Falloff * GBuffer.DiffuseColor * 1/PI * 1/2 * HairShadow;
