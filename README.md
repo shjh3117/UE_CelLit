@@ -56,4 +56,6 @@ This outline effect is based on depth detection and includes basic enhancements.
 Improved specular  
 ~~Face shadow bug fix~~  
 Material instances for hair, eyes, etc.  
+<img width="574" height="532" alt="image" src="https://github.com/user-attachments/assets/d046b4e4-2ed2-497d-b3aa-7d9d2d3faf3a" />
+
 Better-suited post-process enhancements
