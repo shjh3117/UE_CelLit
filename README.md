@@ -1,4 +1,4 @@
-A personal project exploring stylized rendering.  
+An individually developed project focusing on stylized rendering.
  This content has been translated by AI. Please understand any potential contextual ambiguity.  
 
 # **Custom stylized shader plugin for Unreal Engine 5**
