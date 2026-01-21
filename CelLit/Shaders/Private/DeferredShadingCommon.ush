@@ -39,6 +39,7 @@ Texture2D GBufferDTexture;
 Texture2D GBufferETexture;
 Texture2D GBufferVelocityTexture;
 Texture2D GBufferFTexture;
+Texture2D GBufferSGGXTexture;
 Texture2D<uint> SceneLightingChannels;
 
 #define SceneDepthTextureSampler GlobalPointClampedSampler
@@ -49,6 +50,7 @@ Texture2D<uint> SceneLightingChannels;
 #define GBufferETextureSampler GlobalPointClampedSampler
 #define GBufferFTextureSampler GlobalPointClampedSampler
 #define GBufferVelocityTextureSampler GlobalPointClampedSampler
+#define GBufferSGGXTextureSampler GlobalPointClampedSampler
 
 float SampleDeviceZFromSceneTextures(float2 UV)
 {
@@ -297,7 +299,6 @@ uint DecodeSelectiveOutputMask(float InPackedChannel)
 	return ((uint)round(InPackedChannel * (float)0xFF)) & ~SHADINGMODELID_MASK;
 }
 
-// cel -shjh3117-
 bool IsSubsurfaceModel(int ShadingModel)
 {
 	return ShadingModel == SHADINGMODELID_SUBSURFACE 
@@ -305,8 +306,7 @@ bool IsSubsurfaceModel(int ShadingModel)
 		|| ShadingModel == SHADINGMODELID_SUBSURFACE_PROFILE
 		|| ShadingModel == SHADINGMODELID_TWOSIDED_FOLIAGE
 		|| ShadingModel == SHADINGMODELID_HAIR
-		|| ShadingModel == SHADINGMODELID_EYE
-		|| ShadingModel == SHADINGMODELID_CLOTH;
+		|| ShadingModel == SHADINGMODELID_EYE;
 }
 
 bool UseSubsurfaceProfile(int ShadingModel)
@@ -378,6 +378,8 @@ struct FGBufferData
 	// in unreal units (linear), can be used to reconstruct world position,
 	// only valid when decoding the GBuffer as the value gets reconstructed from the Z buffer
 	float Depth;
+	// 0..1 viewport UV in view rect
+	float2 ViewportUV;
 	// Velocity for motion blur (only used when WRITES_VELOCITY_TO_GBUFFER is enabled)
 	half4 Velocity;
 
@@ -387,9 +389,14 @@ struct FGBufferData
 	half StoredSpecular;
 	// 0..1, only needed by SHADINGMODELID_EYE which encodes Iris Distance inside Metallic
 	half StoredMetallic;
+	// Only needed for SHADINGMODELID_TWOSIDED_FOLIAGE
+	half3 NormalDistribution;
 
 	// Curvature for mobile subsurface profile
 	half Curvature;
+
+	// CelLit - Add CustomData for Normal or Tangent Vertor
+	half3 CelData;
 };
 
 bool CastContactShadow(FGBufferData GBufferData)
@@ -411,6 +418,24 @@ bool IsFirstPerson(FGBufferData GBufferData)
 {
 #if !ALLOW_STATIC_LIGHTING
 	return (GBufferData.SelectiveOutputMask & IS_FIRST_PERSON_MASK) != 0;
+#else
+	return false;
+#endif
+}
+
+bool HasPrecShadowMask(FGBufferData GBufferData)
+{
+#if ALLOW_STATIC_LIGHTING
+	return !(GBufferData.SelectiveOutputMask & SKIP_PRECSHADOW_MASK);
+#else
+	return false;
+#endif
+}
+
+bool HasZeroPrecShadowMask(FGBufferData GBufferData)
+{
+#if ALLOW_STATIC_LIGHTING
+	return GBufferData.SelectiveOutputMask & ZERO_PRECSHADOW_MASK;
 #else
 	return false;
 #endif
@@ -552,7 +577,8 @@ void MobileEncodeGBuffer(
 
 		OutGBufferB.r = GBuffer.Metallic;
 		OutGBufferB.g = GBuffer.Specular;
-		OutGBufferB.b = GBuffer.Roughness;
+		// GBuffer can be overwritten by decals and others. See MobileBasePassPixelShader.usf for this clamp
+		OutGBufferB.b = max(0.015625, GBuffer.Roughness);
 		OutGBufferB.a = GBuffer.ShadingModelID / 255.0;
 
 		OutGBufferC.rgb = EncodeBaseColor( GBuffer.BaseColor );
@@ -839,8 +865,21 @@ FGBufferData MobileFetchAndDecodeGBuffer(in float2 UV, in float2 PixelPos)
 	return MobileFetchAndDecodeGBuffer(UV, PixelPos, 0);
 }
 
+// Mirror desktop GetGBufferData() 
+FGBufferData GetGBufferData(float2 UV, bool bGetNormalizedNormal = true, bool bForceUnlitOrDefaultLit = false)
+{
+	float PixelPos = trunc(UV * View.BufferSizeAndInvSize.xy * View.BufferToSceneTextureScale.xy);
+	FGBufferData GBuffer = MobileFetchAndDecodeGBuffer(UV, PixelPos);
+	if (bGetNormalizedNormal)
+	{
+		GBuffer.WorldNormal = normalize(GBuffer.WorldNormal);
+	}
+	return GBuffer;
+}
+
 #endif //SHADING_PATH_MOBILE
 
+// UE_DEPRECATED 5.7 - Deprecated by Substrate
 /** Populates OutGBufferA, B and C */
 void EncodeGBuffer(
 	FGBufferData GBuffer,
@@ -947,6 +986,7 @@ void AdjustBaseColorAndSpecularColorForSubsurfaceProfileLighting(inout float3 Ba
 #endif
 }
 
+// UE_DEPRECATED 5.7 - Deprecated by Substrate
 /** Populates FGBufferData */
 // @param bChecker High frequency Checkerboard pattern computed with one of the CheckerFrom.. functions, todo: profile if float 0/1 would be better (need to make sure it's 100% the same)
 FGBufferData DecodeGBufferData(
@@ -1001,13 +1041,14 @@ FGBufferData DecodeGBufferData(
 
 	// FirstPerson uses a bit in SelectiveOutputMask that is aliased with ZERO_PRECSHADOW_MASK when !ALLOW_STATIC_LIGHTING, so we explicitly skip this logic here.
 #if ALLOW_STATIC_LIGHTING
-	GBuffer.PrecomputedShadowFactors = !(GBuffer.SelectiveOutputMask & SKIP_PRECSHADOW_MASK) ? InGBufferE :  ((GBuffer.SelectiveOutputMask & ZERO_PRECSHADOW_MASK) ? 0 :  1);
+	GBuffer.PrecomputedShadowFactors = HasPrecShadowMask(GBuffer) ? InGBufferE : (HasZeroPrecShadowMask(GBuffer) ? 0 : 1);
 #else
 	GBuffer.PrecomputedShadowFactors = half(1.0f);
 #endif
 	GBuffer.CustomDepth = ConvertFromDeviceZ(CustomNativeDepth);
 	GBuffer.CustomStencil = CustomStencil;
 	GBuffer.Depth = SceneDepth;
+	GBuffer.ViewportUV = 0;
 
 	GBuffer.StoredBaseColor = GBuffer.BaseColor;
 	GBuffer.StoredMetallic = GBuffer.Metallic;
@@ -1056,6 +1097,8 @@ FGBufferData DecodeGBufferData(
 
 	GBuffer.Velocity = !(GBuffer.SelectiveOutputMask & SKIP_VELOCITY_MASK) ? InGBufferVelocity : 0;
 
+	GBuffer.NormalDistribution = 0.0;
+
 	return GBuffer;
 }
 
@@ -1074,14 +1117,36 @@ uint ExtractSubsurfaceProfileInt(FGBufferData BufferData)
 	return ExtractSubsurfaceProfileInt(BufferData.CustomData.r);
 }
 
+float ConvertSubsurfaceProfileToFloat(uint InProfileIdUint)
+{
+	return (0xFF & InProfileIdUint) * (1.f / 255.f);
+}
+
 #if SHADING_PATH_DEFERRED
 
 #if FEATURE_LEVEL >= FEATURE_LEVEL_SM5
+	// UE_DEPRECATED 5.7 - Deprecated by Substrate
 	// @param PixelPos relative to left top of the rendertarget (not viewport)
 	FGBufferData GetGBufferDataUint(uint2 PixelPos, bool bGetNormalizedNormal = true)
 	{
+		FGBufferData GBuffer;
 	#if GBUFFER_REFACTOR
-		return DecodeGBufferDataUint(PixelPos,bGetNormalizedNormal);
+		// CelLit
+		// 1. GBuffer Decode
+		GBuffer = DecodeGBufferDataUint(PixelPos, false);
+		/*
+		if (GBuffer.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN)
+		{
+			// 2. Camera Direction Vector (Constant for all pixels)
+			float3 CameraVector = -View.ViewForward;
+			
+			GBuffer.CelData = GBuffer.WorldNormal;
+			// 3. Set Camera Vector to WorldNormal
+			GBuffer.WorldNormal = CameraVector;
+
+		}
+		*/
+		
 	#else 
 		float4 GBufferA = SceneTexturesStruct.GBufferATexture.Load(int3(PixelPos, 0));
 		float4 GBufferB = SceneTexturesStruct.GBufferBTexture.Load(int3(PixelPos, 0));
@@ -1106,10 +1171,16 @@ uint ExtractSubsurfaceProfileInt(FGBufferData BufferData)
 
 		float SceneDepth = CalcSceneDepth(PixelPos);
 
-		return DecodeGBufferData(GBufferA, GBufferB, GBufferC, GBufferD, GBufferE, GBufferF, GBufferVelocity, CustomNativeDepth, CustomStencil, SceneDepth, bGetNormalizedNormal, CheckerFromPixelPos(PixelPos));
+		GBuffer = DecodeGBufferData(GBufferA, GBufferB, GBufferC, GBufferD, GBufferE, GBufferF, GBufferVelocity, SGGX, CustomNativeDepth, CustomStencil, SceneDepth, bGetNormalizedNormal, CheckerFromPixelPos(PixelPos));
 	#endif
+		{
+			const float2 PixelPosF = float2(PixelPos) + 0.5f;
+			GBuffer.ViewportUV = (PixelPosF - View.ViewRectMin.xy) * View.ViewSizeAndInvSize.zw;
+		}
+		return GBuffer;
 	}
 
+	// UE_DEPRECATED 5.7 - Deprecated by Substrate
 	// @param PixelPos relative to left top of the rendertarget (not viewport)
 	FScreenSpaceData GetScreenSpaceDataUint(uint2 PixelPos, bool bGetNormalizedNormal = true)
 	{
@@ -1124,12 +1195,28 @@ uint ExtractSubsurfaceProfileInt(FGBufferData BufferData)
 	}
 #endif
 
+// UE_DEPRECATED 5.7 - Deprecated by Substrate
 // @param UV - UV space in the GBuffer textures (BufferSize resolution)
 // TOOD: need to find a way to make this more convenient.
-FGBufferData GetGBufferDataFromSceneTextures(float2 UV, bool bGetNormalizedNormal = true)
+FGBufferData GetGBufferDataFromSceneTextures(float2 UV, bool bGetNormalizedNormal = true, bool bForceUnlitOrDefaultLit = false)
 {
+	FGBufferData GBuffer;
 #if GBUFFER_REFACTOR
-	return DecodeGBufferDataSceneTextures(UV,bGetNormalizedNormal);
+	// CelLit
+	// 1. GBuffer Decode
+	GBuffer = DecodeGBufferDataSceneTextures(UV, false, bForceUnlitOrDefaultLit);
+	/*
+	if (GBuffer.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN)
+	{
+		// 2. Camera Direction Vector (Constant for all pixels)
+		float3 CameraVector = -View.ViewForward;
+		
+		GBuffer.CelData = GBuffer.WorldNormal;
+		// 3. Set Camera Vector to WorldNormal
+		GBuffer.WorldNormal = CameraVector;	
+	}
+	*/
+
 #else
 	float4 GBufferA = GBufferATexture.SampleLevel(GBufferATextureSampler, UV, 0);
 	float4 GBufferB = GBufferBTexture.SampleLevel(GBufferBTextureSampler, UV, 0);
@@ -1146,8 +1233,10 @@ FGBufferData GetGBufferDataFromSceneTextures(float2 UV, bool bGetNormalizedNorma
 
 	float SceneDepth = ConvertFromDeviceZ(DeviceZ);
 
-	return DecodeGBufferData(GBufferA, GBufferB, GBufferC, GBufferD, GBufferE, GBufferF, GBufferVelocity, CustomNativeDepth, CustomStencil, SceneDepth, bGetNormalizedNormal, CheckerFromSceneColorUV(UV));
+	GBuffer = DecodeGBufferData(GBufferA, GBufferB, GBufferC, GBufferD, GBufferE, GBufferF, GBufferVelocity, SGGX, CustomNativeDepth, CustomStencil, SceneDepth, bGetNormalizedNormal, CheckerFromSceneColorUV(UV));
 #endif
+	GBuffer.ViewportUV = BufferUVToViewportUV(UV);
+	return GBuffer;
 }
 
 /** Returns the light channel mask that should be executed for this pixel. */
@@ -1161,11 +1250,27 @@ uint GetSceneLightingChannel(uint2 PixelCoord)
 	return ~0;
 }
 
+// UE_DEPRECATED 5.7 - Deprecated by Substrate
 // @param UV - UV space in the GBuffer textures (BufferSize resolution)
-FGBufferData GetGBufferData(float2 UV, bool bGetNormalizedNormal = true)
+FGBufferData GetGBufferData(float2 UV, bool bGetNormalizedNormal = true, bool bForceUnlitOrDefaultLit = false)
 {
+	FGBufferData GBuffer;
 #if GBUFFER_REFACTOR
-	return DecodeGBufferDataUV(UV,bGetNormalizedNormal);
+	// CelLit
+	// 1. GBuffer Decode
+	GBuffer = DecodeGBufferDataUV(UV, false, bForceUnlitOrDefaultLit);
+	/*
+	if (GBuffer.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN)
+	{
+		// 2. Camera Direction Vector (Constant for all pixels)
+		float3 CameraVector = -View.ViewForward;
+
+		GBuffer.CelData = GBuffer.WorldNormal;
+		// 3. Set Camera Vector to WorldNormal
+		GBuffer.WorldNormal = CameraVector;
+	}
+	*/
+
 #else
 	float4 GBufferA = Texture2DSampleLevel(SceneTexturesStruct.GBufferATexture, SceneTexturesStruct_GBufferATextureSampler, UV, 0);
 	float4 GBufferB = Texture2DSampleLevel(SceneTexturesStruct.GBufferBTexture, SceneTexturesStruct_GBufferBTextureSampler, UV, 0);
@@ -1194,22 +1299,26 @@ FGBufferData GetGBufferData(float2 UV, bool bGetNormalizedNormal = true)
 
 	float SceneDepth = CalcSceneDepth(UV);
 	
-	return DecodeGBufferData(GBufferA, GBufferB, GBufferC, GBufferD, GBufferE, GBufferF, GBufferVelocity, CustomNativeDepth, CustomStencil, SceneDepth, bGetNormalizedNormal, CheckerFromSceneColorUV(UV));
+	GBuffer = DecodeGBufferData(GBufferA, GBufferB, GBufferC, GBufferD, GBufferE, GBufferF, GBufferVelocity, CustomNativeDepth, CustomStencil, SceneDepth, bGetNormalizedNormal, CheckerFromSceneColorUV(UV));
 #endif
+	GBuffer.ViewportUV = BufferUVToViewportUV(UV);
+	return GBuffer;
 }
 
+// UE_DEPRECATED 5.7 - Deprecated by Substrate
 // Minimal path for just the lighting model, used to branch around unlit pixels (skybox)
 uint GetShadingModelId(float2 UV)
 {
 	return DecodeShadingModelId(Texture2DSampleLevel(SceneTexturesStruct.GBufferBTexture, SceneTexturesStruct_GBufferBTextureSampler, UV, 0).a);
 }
 
+// UE_DEPRECATED 5.7 - Deprecated by Substrate
 // @param UV - UV space in the GBuffer textures (BufferSize resolution)
-FScreenSpaceData GetScreenSpaceData(float2 UV, bool bGetNormalizedNormal = true)
+FScreenSpaceData GetScreenSpaceData(float2 UV, bool bGetNormalizedNormal = true, bool bForceUnlitOrDefaultLit = false)
 {
 	FScreenSpaceData Out;
 
-	Out.GBuffer = GetGBufferData(UV, bGetNormalizedNormal);
+	Out.GBuffer = GetGBufferData(UV, bGetNormalizedNormal, bForceUnlitOrDefaultLit);
 	float4 ScreenSpaceAO = Texture2DSampleLevel(SceneTexturesStruct.ScreenSpaceAOTexture, SceneTexturesStruct_ScreenSpaceAOTextureSampler, UV, 0);
 
 	Out.AmbientOcclusion = ScreenSpaceAO.r;
@@ -1227,4 +1336,4 @@ half3 AOMultiBounce(half3 BaseColor, half AO)
 	return max(AO, ((AO * a + b) * AO + c) * AO);
 }
 
-#define LIGHTING_CHANNELS_TEXTURE_DISTANCE_FIELD_REPRESENTATION_BIT 3
+#define LIGHTING_CHANNELS_TEXTURE_RAY_TRACING_REPRESENTATION_BIT 3
