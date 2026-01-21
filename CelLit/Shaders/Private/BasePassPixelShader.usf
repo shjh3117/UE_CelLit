@@ -103,6 +103,7 @@
 #include "VelocityCommon.ush"
 #include "DBufferDecalShared.ush"
 #include "ShadingModelsSampling.ush"
+#include "SGGX.ush"
 
 #include "SceneTexturesCommon.ush"
 #include "SceneTextureParameters.ush"
@@ -211,7 +212,7 @@
 #if SUBSTRATE_TRANSLUCENT_FORWARD || SUBSTRATE_FORWARD_SHADING
 #include "/Engine/Private/Substrate/SubstrateForwardLighting.ush"
 #endif
-#if MATERIAL_SUBSTRATE_OPAQUE_PRECOMPUTED_LIGHTING || SUBSTRATE_MATERIAL_EXPORT_EXECUTED || SUBTRATE_GBUFFER_FORMAT==0
+#if MATERIAL_SUBSTRATE_OPAQUE_PRECOMPUTED_LIGHTING || SUBSTRATE_MATERIAL_EXPORT_EXECUTED || SUBSTRATE_GBUFFER_FORMAT==0
 #include "/Engine/Private/Substrate/SubstrateExport.ush"
 #endif
 
@@ -239,16 +240,23 @@ bool ManualDepthTestEqual(float4 SvPosition, float PSDeviceZWithOffset)
 	return DepthTest_Equal;
 }
 
+#endif // !FORWARD_SHADING
+
+#if !FORWARD_SHADING || TRANSLUCENCY_LIGHTING_SURFACE_FORWARDSHADING
+
 /** Calculates lighting for translucency. */
-float3 GetTranslucencyVolumeLighting(
+void GetTranslucencyVolumeLighting(
 	FMaterialPixelParameters MaterialParameters, 
 	FPixelMaterialInputs PixelMaterialInputs,
 	FBasePassInterpolantsVSToPS BasePassInterpolants, 
 	FGBufferData GBuffer, 
-	float IndirectIrradiance)
+	float IndirectIrradiance,
+	out float3 DiffuseLighting,
+	out float3 SpecularLighting)
 {
 	float4 VolumeLighting;
-	float3 InterpolatedLighting = 0;
+	DiffuseLighting = 0;
+	SpecularLighting = 0;
 	
 	float3 LightingPositionOffset = MaterialParameters.LightingPositionOffset;
 
@@ -267,22 +275,62 @@ float3 GetTranslucencyVolumeLighting(
 
 	#if TRANSLUCENCY_LIGHTING_VOLUMETRIC_PERVERTEX_DIRECTIONAL
 
-		GetVolumeLightingDirectional(float4(BasePassInterpolants.AmbientLightingVector, 1), BasePassInterpolants.DirectionalLightingVector, MaterialParameters.WorldNormal, GBuffer.DiffuseColor, GetMaterialTranslucencyDirectionalLightingIntensity(), InterpolatedLighting, VolumeLighting);
+		GetVolumeLightingDirectional(float4(BasePassInterpolants.AmbientLightingVector, 1), BasePassInterpolants.DirectionalLightingVector, MaterialParameters.WorldNormal, GBuffer.DiffuseColor, GetMaterialTranslucencyDirectionalLightingIntensity(), DiffuseLighting, VolumeLighting);
 
 	#elif TRANSLUCENCY_LIGHTING_VOLUMETRIC_PERVERTEX_NONDIRECTIONAL
 
-		GetVolumeLightingNonDirectional(float4(BasePassInterpolants.AmbientLightingVector, 1), GBuffer.DiffuseColor, InterpolatedLighting, VolumeLighting);
+		GetVolumeLightingNonDirectional(float4(BasePassInterpolants.AmbientLightingVector, 1), GBuffer.DiffuseColor, DiffuseLighting, VolumeLighting);
 
 	#elif TRANSLUCENCY_LIGHTING_VOLUMETRIC_DIRECTIONAL || TRANSLUCENCY_LIGHTING_SURFACE_LIGHTINGVOLUME
 	
 		float4 AmbientLightingVector = GetAmbientLightingVectorFromTranslucentLightingVolume(InnerVolumeUVs, OuterVolumeUVs, FinalLerpFactor);
 		float3 DirectionalLightingVector = GetDirectionalLightingVectorFromTranslucentLightingVolume(InnerVolumeUVs, OuterVolumeUVs, FinalLerpFactor);
-		GetVolumeLightingDirectional(AmbientLightingVector, DirectionalLightingVector, MaterialParameters.WorldNormal, GBuffer.DiffuseColor, GetMaterialTranslucencyDirectionalLightingIntensity(), InterpolatedLighting, VolumeLighting);
+		GetVolumeLightingDirectional(AmbientLightingVector, DirectionalLightingVector, MaterialParameters.WorldNormal, GBuffer.DiffuseColor, GetMaterialTranslucencyDirectionalLightingIntensity(), DiffuseLighting, VolumeLighting);
 
 	#elif TRANSLUCENCY_LIGHTING_VOLUMETRIC_NONDIRECTIONAL
 
 		float4 AmbientLightingVector = GetAmbientLightingVectorFromTranslucentLightingVolume(InnerVolumeUVs, OuterVolumeUVs, FinalLerpFactor);
-		GetVolumeLightingNonDirectional(AmbientLightingVector, GBuffer.DiffuseColor, InterpolatedLighting, VolumeLighting);
+		GetVolumeLightingNonDirectional(AmbientLightingVector, GBuffer.DiffuseColor, DiffuseLighting, VolumeLighting);
+
+	#elif TRANSLUCENCY_LIGHTING_SURFACE_FORWARDSHADING
+	
+		if (TranslucencyLightingForwardUsingVolume)
+		{
+			float4 AmbientLightingVector = GetAmbientLightingVectorFromTranslucentLightingVolume(InnerVolumeUVs, OuterVolumeUVs, FinalLerpFactor);
+			float3 DirectionalLightingVector = GetDirectionalLightingVectorFromTranslucentLightingVolume(InnerVolumeUVs, OuterVolumeUVs, FinalLerpFactor);
+			FTwoBandSHVectorRGB TranslucentLighting = ReconstructSHCoefficients(AmbientLightingVector, DirectionalLightingVector);
+			
+			GetVolumeLightingDirectional(TranslucentLighting, AmbientLightingVector.a, MaterialParameters.WorldNormal, GBuffer.DiffuseColor, GetMaterialTranslucencyDirectionalLightingIntensity(), DiffuseLighting, VolumeLighting);
+
+			const float3 MaxDirection = GetMaximumDirection(GetLuminance(TranslucentLighting));
+
+			// TODO: need more accurate transfer coefficients to approximate specular with.
+			FTwoBandSHVector TransferSH = CalcDiffuseTransferSH(MaxDirection, /*Exponent*/ 0.0f); 
+
+			const float3 Color = max(float3(0,0,0), DotSH(TranslucentLighting, TransferSH));
+
+			FDeferredLightData LightData = (FDeferredLightData)0;
+			LightData.Color				= Color;
+			LightData.FalloffExponent	= 0;
+			LightData.Direction			= MaxDirection;
+			LightData.DistanceFadeMAD	= 0;
+			LightData.bRadialLight		= false;
+			LightData.SpecularScale		= 1.0f;
+			LightData.DiffuseScale		= 0.0f;
+			LightData.ShadowedBits		= 1;
+			LightData.HairTransmittance	= InitHairTransmittanceData();
+			LightData.SourceRadius		= 0;
+			LightData.SoftSourceRadius	= 0;
+			LightData.IESAtlasIndex		= -1;
+			LightData.LightFunctionAtlasLightIndex = 0;
+			LightData.bAffectsTranslucentLighting = true;
+			LightData.ShadowMapChannelMask = 0;
+
+			float SurfaceShadow = 1.0f;
+			FDeferredLightingSplit ApproximateLighting = GetDynamicLightingSplit(MaterialParameters.WorldPosition_CamRelative, -MaterialParameters.CameraVector, GBuffer, 1, LightData, /*LightAttenuation*/ 1.0f, /*Dither*/ 0.0f, uint2(0,0), SurfaceShadow);
+
+			SpecularLighting += ApproximateLighting.SpecularLighting.rgb;
+		}
 
 	#endif
 
@@ -308,7 +356,7 @@ float3 GetTranslucencyVolumeLighting(
 			// Force unshadowed if we read outside the valid area of the shadowmap atlas
 			// This can happen if the particle system's bounds don't match its visible area
 			FLATTEN
-			if (any(ShadowUVs < TranslucentSelfShadow.ShadowUVMinMax.xy || ShadowUVs > TranslucentSelfShadow.ShadowUVMinMax.zw))
+			if (any(or(ShadowUVs < TranslucentSelfShadow.ShadowUVMinMax.xy, ShadowUVs > TranslucentSelfShadow.ShadowUVMinMax.zw)))
 			{
 				SelfShadowing = 1;
 			}
@@ -343,15 +391,13 @@ float3 GetTranslucencyVolumeLighting(
 			float3 SelfShadowingCorrection = TranslucentSelfShadow.DirectionalLightColor.rgb * VolumeLighting.a * (1 - SelfShadowing);
 				
 			// Combine backscattering and directional light self shadowing
-			InterpolatedLighting = (BackscatteredLighting + GBuffer.DiffuseColor * max(VolumeLighting.rgb - SelfShadowingCorrection, 0));
+			DiffuseLighting = (BackscatteredLighting + GBuffer.DiffuseColor * max(VolumeLighting.rgb - SelfShadowingCorrection, 0));
 		}
 
 	#endif
-
-	return InterpolatedLighting;
 }
 
-#endif
+#endif // !FORWARD_SHADING || TRANSLUCENCY_LIGHTING_SURFACE_FORWARDSHADING
 
 /** Computes sky diffuse lighting, including precomputed shadowing. */
 void GetSkyLighting(FMaterialPixelParameters MaterialParameters, VTPageTableResult LightmapVTPageTableResult, bool bEvaluateBackface, float3 WorldNormal, LightmapUVType LightmapUV, uint LightmapDataIndex, float3 SkyOcclusionUV3D, out float3 OutDiffuseLighting, out float3 OutSubsurfaceLighting)
@@ -362,8 +408,11 @@ void GetSkyLighting(FMaterialPixelParameters MaterialParameters, VTPageTableResu
 #if (MATERIALBLENDING_TRANSLUCENT || MATERIALBLENDING_ADDITIVE || MATERIALBLENDING_MODULATE) && PROJECT_SUPPORTS_LUMEN && !FORWARD_SHADING
 	if (IsLumenTranslucencyGIEnabled())
 	{
-		// Lumen Dynamic GI + shadowed Skylight
-		FTwoBandSHVectorRGB TranslucencyGISH = GetTranslucencyGIVolumeLighting(MaterialParameters.AbsoluteWorldPosition, ResolvedView.WorldToClip, true);
+		const float3 VolumeUV = ComputeTranslucencyGIVolumeUV(MaterialParameters.AbsoluteWorldPosition, ResolvedView.WorldToClip);
+		if(VolumeUV.z < 1.0)
+		{
+			// Lumen Dynamic GI + shadowed Skylight
+			FTwoBandSHVectorRGB TranslucencyGISH = GetTranslucencyGIVolumeLighting(MaterialParameters.AbsoluteWorldPosition, ResolvedView.WorldToClip, true);
 
 		#if TRANSLUCENCY_LIGHTING_VOLUMETRIC_NONDIRECTIONAL || TRANSLUCENCY_LIGHTING_VOLUMETRIC_PERVERTEX_NONDIRECTIONAL
 
@@ -388,6 +437,17 @@ void GetSkyLighting(FMaterialPixelParameters MaterialParameters, VTPageTableResu
 			}
 			#endif
 		#endif
+		}
+		else
+		{
+			OutDiffuseLighting += GetEffectiveSkySHDiffuse(WorldNormal) * ResolvedView.SkyLightColor.rgb;
+			#if SHADINGMODEL_REQUIRES_BACKFACE_LIGHTING
+			if (bEvaluateBackface)
+			{
+				OutDiffuseLighting += GetEffectiveSkySHDiffuse(-WorldNormal) * ResolvedView.SkyLightColor.rgb;
+			}
+			#endif
+		}
 	}
 	else
 #endif
@@ -833,7 +893,9 @@ void FPixelShaderInOut_MainPS(
 	in FPixelShaderIn In,
 	inout FPixelShaderOut Out,
 	const uint EyeIndex,
-	uint QuadPixelWriteMask=1)
+	uint QuadPixelWriteMask=1,
+	uint2 QuadPixelPos=0,
+	bool bQuadShadingEnabled=false)
 {
 	// Velocity
 	float4 OutVelocity = 0;
@@ -888,7 +950,7 @@ void FPixelShaderInOut_MainPS(
 #if LIGHTMAP_VT_ENABLED
 	// This must occur after CalcMaterialParameters(), which is required to initialize the VT feedback mechanism
 	// Lightmap request is always the first VT sample in the shader
-	StoreVirtualTextureFeedback(MaterialParameters.VirtualTextureFeedback, 0, LightmapVTPageTableResult.PackedRequest, LightmapVTPageTableResult.PendingMips);
+	StoreVirtualTextureFeedback(MaterialParameters.VirtualTextureFeedback, LightmapVTPageTableResult.PackedRequest, LightmapVTPageTableResult.PendingMips);
 #endif
 
 #if USE_EDITOR_COMPOSITING && (FEATURE_LEVEL >= FEATURE_LEVEL_SM4 || MOBILE_EMULATION)
@@ -963,14 +1025,15 @@ void FPixelShaderInOut_MainPS(
 		if (false) // Dummy if to make the ifdef logic play nicely
 		{
 		}
-#if MATERIAL_SHADINGMODEL_SUBSURFACE || MATERIAL_SHADINGMODEL_TWOSIDED_FOLIAGE
-		else if (ShadingModel == SHADINGMODELID_SUBSURFACE || ShadingModel == SHADINGMODELID_TWOSIDED_FOLIAGE)
+#if MATERIAL_SHADINGMODEL_SUBSURFACE  || MATERIAL_SHADINGMODEL_TWOSIDED_FOLIAGE
+		else if (ShadingModel == SHADINGMODELID_SUBSURFACE  || ShadingModel == SHADINGMODELID_TWOSIDED_FOLIAGE)
 		{
 			SubsurfaceColor = SubsurfaceData.rgb * View.DiffuseOverrideParameter.w + View.DiffuseOverrideParameter.xyz;
 		}
 #endif
+// CelLit - Adjust subsurfaceColor rgb for PREINTEGRATED_SKIN
 #if MATERIAL_SHADINGMODEL_CLOTH || MATERIAL_SHADINGMODEL_PREINTEGRATED_SKIN
-		else if (ShadingModel == SHADINGMODELID_CLOTH || ShadingModel == SHADINGMODELID_PREINTEGRATED_SKIN) // cel
+		else if (ShadingModel == SHADINGMODELID_CLOTH || ShadingModel == SHADINGMODELID_PREINTEGRATED_SKIN)
 		{
 			SubsurfaceColor = SubsurfaceData.rgb;
 		}
@@ -1144,8 +1207,8 @@ void FPixelShaderInOut_MainPS(
 	#else
 		float3 Velocity = Calculate3DVelocity(MaterialParameters.ScreenPosition, BasePassInterpolants.VelocityPrevScreenPosition);
 	#endif
-
-		float4 EncodedVelocity = EncodeVelocityToTexture(Velocity, (GetPrimitiveData(MaterialParameters).Flags & PRIMITIVE_SCENE_DATA_FLAG_HAS_PIXEL_ANIMATION) != 0);
+		float TemporalResponsiveness = GetMaterialTemporalResponsiveness(MaterialParameters);	
+		float4 EncodedVelocity = EncodeVelocityToTexture(Velocity, (GetPrimitiveData(MaterialParameters).Flags & PRIMITIVE_SCENE_DATA_FLAG_HAS_PIXEL_ANIMATION) != 0, TemporalResponsiveness);
 
 	#if USES_GBUFFER
 		GBuffer.Velocity = EncodedVelocity;
@@ -1200,7 +1263,12 @@ void FPixelShaderInOut_MainPS(
 	}
 
 	float3 InputBentNormal = MaterialParameters.WorldNormal;
-			
+	// CelLit
+	if (GBuffer.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN)
+	{
+		InputBentNormal = MaterialParameters.CameraVector;
+	}
+
 	// Clear Coat Bottom Normal
 	BRANCH if( GBuffer.ShadingModelID == SHADINGMODELID_CLEAR_COAT && CLEAR_COAT_BOTTOM_NORMAL)
 	{
@@ -1236,8 +1304,7 @@ void FPixelShaderInOut_MainPS(
 		float3 DiffuseDir = ShadingOcclusion.BentNormal;
 		float3 DiffuseColorForIndirect = GBuffer.DiffuseColor;
 
-		// cel -shjh3117-
-		// Remove SubsurfaceColor
+		// CelLit - Remove SubsurfaceColor for Preintegrated Skin
 		#if MATERIAL_SHADINGMODEL_SUBSURFACE
 		if (GBuffer.ShadingModelID == SHADINGMODELID_SUBSURFACE)
 		{
@@ -1246,6 +1313,8 @@ void FPixelShaderInOut_MainPS(
 			DiffuseColorForIndirect += SubsurfaceColor;
 		}
 		#endif
+
+		// CelLit - Remove SubsurfaceColor for CLOTH
 
 		#if MATERIAL_SHADINGMODEL_HAIR
 		if (GBuffer.ShadingModelID == SHADINGMODELID_HAIR)
@@ -1305,42 +1374,65 @@ void FPixelShaderInOut_MainPS(
 
 				#if FORWARD_SHADING || TRANSLUCENCY_LIGHTING_SURFACE_FORWARDSHADING || MATERIAL_SHADINGMODEL_SINGLELAYERWATER
 
-					float3 DirectionalLightAtmosphereTransmittance = 1.0f;
-
-					#if NEEDS_BASEPASS_PIXEL_FOGGING && PROJECT_SUPPORT_SKY_ATMOSPHERE
-					const uint LightIndex = 0;
-					if (ResolvedView.AtmosphereLightDiscCosHalfApexAngle_PPTrans[LightIndex].y > 0.0f)
+					#if TRANSLUCENCY_LIGHTING_SURFACE_FORWARDSHADING
+					if (!TranslucencyLightingForwardUsingVolume)
+					#endif // TRANSLUCENCY_LIGHTING_SURFACE_FORWARDSHADING
 					{
-						// Only when using forward shading, we can evaluate per pixel atmosphere transmittance.
-						const float3 PlanetCenterToTranslatedWorldPos = (GetTranslatedWorldPosition(MaterialParameters) - ResolvedView.SkyPlanetTranslatedWorldCenterAndViewHeight.xyz) * CM_TO_SKY_UNIT;
-						DirectionalLightAtmosphereTransmittance = GetAtmosphereTransmittance(
-							PlanetCenterToTranslatedWorldPos, ResolvedView.AtmosphereLightDirection[LightIndex].xyz, ResolvedView.SkyAtmosphereBottomRadiusKm, ResolvedView.SkyAtmosphereTopRadiusKm,
-							View.TransmittanceLutTexture, SkyAtmTransmittanceSharedSampler);
-					}
-					#endif // NEEDS_BASEPASS_PIXEL_FOGGING && PROJECT_SUPPORT_SKY_ATMOSPHERE
+						float3 DirectionalLightAtmosphereTransmittance = 1.0f;
 
-					#if MATERIAL_SHADINGMODEL_SINGLELAYERWATER
-					const bool bSkipMainDirLightVirtualShadowMapEvaluation = SingleLayerWater.bMainDirectionalLightVSMFiltering;
-					const bool bSeparateWaterMainDirLightLuminance = (SINGLE_LAYER_WATER_SEPARATED_MAIN_LIGHT > 0) && SingleLayerWater.bSeparateMainDirLightLuminance;
-					#else
-					const bool bSkipMainDirLightVirtualShadowMapEvaluation = false;
-					const bool bSeparateWaterMainDirLightLuminance = false;
-					#endif
+						#if NEEDS_BASEPASS_PIXEL_FOGGING && PROJECT_SUPPORT_SKY_ATMOSPHERE
+						const uint LightIndex = 0;
+						if (ResolvedView.AtmosphereLightDiscCosHalfApexAngle_PPTrans[LightIndex].y > 0.0f)
+						{
+							// Only when using forward shading, we can evaluate per pixel atmosphere transmittance.
+							const float3 PlanetCenterToTranslatedWorldPos = (GetTranslatedWorldPosition(MaterialParameters) - ResolvedView.SkyPlanetTranslatedWorldCenterAndViewHeight.xyz) * CM_TO_SKY_UNIT;
+							DirectionalLightAtmosphereTransmittance = GetAtmosphereTransmittance(
+								PlanetCenterToTranslatedWorldPos, ResolvedView.AtmosphereLightDirection[LightIndex].xyz, ResolvedView.SkyAtmosphereBottomRadiusKm, ResolvedView.SkyAtmosphereTopRadiusKm,
+								View.TransmittanceLutTexture, SkyAtmTransmittanceSharedSampler);
+						}
+						#endif // NEEDS_BASEPASS_PIXEL_FOGGING && PROJECT_SUPPORT_SKY_ATMOSPHERE
 
-					FDeferredLightingSplit ForwardDirectLighting = GetForwardDirectLightingSplit(
-						In.SvPosition.xy,
-						GridIndex, MaterialParameters.WorldPosition_CamRelative, MaterialParameters.CameraVector, GBuffer, NearestResolvedDepthScreenUV, MaterialParameters.PrimitiveId, EyeIndex, Dither, 
-						DirectionalLightCloudShadow, DirectionalLightAtmosphereTransmittance, DirectionalLightShadow,
-						bSeparateWaterMainDirLightLuminance, SeparatedWaterMainDirLightLuminance,
-						bSkipMainDirLightVirtualShadowMapEvaluation);
+						#if MATERIAL_SHADINGMODEL_SINGLELAYERWATER
+						const bool bSkipMainDirLightVirtualShadowMapEvaluation = SingleLayerWater.bMainDirectionalLightVSMFiltering;
+						const bool bSeparateWaterMainDirLightLuminance = (SINGLE_LAYER_WATER_SEPARATED_MAIN_LIGHT > 0) && SingleLayerWater.bSeparateMainDirLightLuminance;
+						#else
+						const bool bSkipMainDirLightVirtualShadowMapEvaluation = false;
+						const bool bSeparateWaterMainDirLightLuminance = false;
+						#endif
+
+						FDeferredLightingSplit ForwardDirectLighting = GetForwardDirectLightingSplit(
+							In.SvPosition.xy,
+							GridIndex, MaterialParameters.WorldPosition_CamRelative, MaterialParameters.CameraVector, GBuffer, NearestResolvedDepthScreenUV, MaterialParameters.PrimitiveId, EyeIndex, Dither, 
+							DirectionalLightCloudShadow, DirectionalLightAtmosphereTransmittance, DirectionalLightShadow,
+							bSeparateWaterMainDirLightLuminance, SeparatedWaterMainDirLightLuminance,
+							bSkipMainDirLightVirtualShadowMapEvaluation);
 					
-					#if MATERIAL_SHADINGMODEL_THIN_TRANSLUCENT
-						DiffuseColor += ForwardDirectLighting.DiffuseLighting.rgb;
-						ColorSeparateSpecular += ForwardDirectLighting.SpecularLighting.rgb;
-					#else
-						Color += ForwardDirectLighting.DiffuseLighting.rgb;
-						Color += ForwardDirectLighting.SpecularLighting.rgb;
-					#endif
+						#if MATERIAL_SHADINGMODEL_THIN_TRANSLUCENT
+							DiffuseColor += ForwardDirectLighting.DiffuseLighting.rgb;
+							ColorSeparateSpecular += ForwardDirectLighting.SpecularLighting.rgb;
+						#else
+							Color += ForwardDirectLighting.DiffuseLighting.rgb;
+							Color += ForwardDirectLighting.SpecularLighting.rgb;
+						#endif
+					}
+					#if TRANSLUCENCY_LIGHTING_SURFACE_FORWARDSHADING
+					else
+					{
+						float3 TLVDiffuseLighting;
+						float3 TLVSpecularLighting;
+						GetTranslucencyVolumeLighting(MaterialParameters, PixelMaterialInputs, BasePassInterpolants, GBuffer, IndirectIrradiance, TLVDiffuseLighting, TLVSpecularLighting);
+						DiffuseColor += TLVDiffuseLighting;
+						ColorSeparateSpecular += TLVSpecularLighting;
+					
+						#if MATERIAL_SHADINGMODEL_THIN_TRANSLUCENT
+							DiffuseColor += TLVDiffuseLighting;
+							ColorSeparateSpecular += TLVSpecularLighting;
+						#else
+							Color += TLVDiffuseLighting;
+							Color += TLVSpecularLighting;
+						#endif
+					}
+					#endif // TRANSLUCENCY_LIGHTING_SURFACE_FORWARDSHADING
 				#endif
 			#endif
 				// No IBL for water in deferred: that is skipped because it is done in the water composite pass. It should however be applied when using forward shading in order to get reflection without the water composite pass.
@@ -1458,10 +1550,14 @@ void FPixelShaderInOut_MainPS(
 #if !SUBSTRATE_ENABLED
 
 	// Volume lighting for lit translucency
-#if (MATERIAL_SHADINGMODEL_DEFAULT_LIT || MATERIAL_SHADINGMODEL_SUBSURFACE) && (MATERIALBLENDING_TRANSLUCENT || MATERIALBLENDING_ADDITIVE) && !FORWARD_SHADING
+#if (MATERIAL_SHADINGMODEL_DEFAULT_LIT || MATERIAL_SHADINGMODEL_SUBSURFACE) && (MATERIALBLENDING_TRANSLUCENT || MATERIALBLENDING_ADDITIVE) && !FORWARD_SHADING && !TRANSLUCENCY_LIGHTING_SURFACE_FORWARDSHADING
 	if (GBuffer.ShadingModelID == SHADINGMODELID_DEFAULT_LIT || GBuffer.ShadingModelID == SHADINGMODELID_SUBSURFACE)
 	{
-		Color += GetTranslucencyVolumeLighting(MaterialParameters, PixelMaterialInputs, BasePassInterpolants, GBuffer, IndirectIrradiance);
+		float3 TLVDiffuseLighting;
+		float3 TLVSpecularLighting;
+		GetTranslucencyVolumeLighting(MaterialParameters, PixelMaterialInputs, BasePassInterpolants, GBuffer, IndirectIrradiance, TLVDiffuseLighting, TLVSpecularLighting);
+		Color += TLVDiffuseLighting;
+		Color += TLVSpecularLighting;
 	}
 #endif
 
@@ -1639,10 +1735,13 @@ void FPixelShaderInOut_MainPS(
 	FSubstrateIntegrationSettings Settings = InitSubstrateIntegrationSettings(false /*bForceFullyRough*/, false /*SubstrateStruct.bRoughDiffuse*/, SubstrateStruct.PeelLayersAboveDepth, SubstrateStruct.bRoughnessTracking);
 
 	const float3 SurfaceWorldNormal = MaterialParameters.TangentToWorld[2].xyz;
+	// Align V with N to not have any view dependent effect when exporting material data.
+	const float3 FakeV = SurfaceWorldNormal;
 	FExportResult Export = SubstrateMaterialExportOut(
 		Settings,
 		SubstratePixelHeader,
 		SubstrateData,
+		FakeV,
 		SurfaceWorldNormal,
 		MaterialParameters.WorldPosition_CamRelative,
 		0.0f /*MobileShadingPathCurvature*/);
@@ -1762,7 +1861,7 @@ void FPixelShaderInOut_MainPS(
 		FSubstrateOpaqueRoughRefractionData OpaqueRoughRefractionData = (FSubstrateOpaqueRoughRefractionData)0;
 		FSubstrateIntegrationSettings Settings = InitSubstrateIntegrationSettings(false /*bForceFullyRough*/, SubstrateStruct.bRoughDiffuse, SubstrateStruct.PeelLayersAboveDepth, SubstrateStruct.bRoughnessTracking);
 
-	#if SUBSTRATE_ADVANCED_DEBUG_ENABLED
+	#if SUBSTRATE_ADVANCED_DEBUG_ENABLED && SUBSTRATE_MATERIALCONTAINER_IS_VIEWRESOURCE
 		Settings.SliceStoringDebugSubstrateTreeData = all(uint2(float2(View.CursorPosition) * View.ViewResolutionFraction) == PixelPos) ? SubstrateStruct.SliceStoringDebugSubstrateTreeDataWithoutMRT : Settings.SliceStoringDebugSubstrateTreeData;
 	#endif
 
@@ -1774,14 +1873,16 @@ void FPixelShaderInOut_MainPS(
 	#endif
 
 
-#if SUBTRATE_GBUFFER_FORMAT==0
+#if SUBSTRATE_GBUFFER_FORMAT==0
 		// GBuffer has been reset above already.
 
 		const float3 SurfaceWorldNormal = MaterialParameters.TangentToWorld[2].xyz;
+		const float3 V = MaterialParameters.CameraVector;
 		FExportResult Export = SubstrateMaterialExportOut(
 			Settings,
 			SubstratePixelHeader,
 			SubstrateData,
+			V,
 			SurfaceWorldNormal,
 			MaterialParameters.WorldPosition_CamRelative,
 			0.0f // Curvature
@@ -1791,6 +1892,8 @@ void FPixelShaderInOut_MainPS(
 		GBuffer.GBufferAO = MaterialAO;
 		GBuffer.PerObjectGBufferData = GetPrimitive_PerObjectGBufferData(MaterialParameters.PrimitiveId);
 		GBuffer.Depth = MaterialParameters.ScreenPosition.w;
+		// GBuffer.SelectiveOutputMask is setup above.
+		EmissiveLuminance = Export.EmissiveLuminance;
 		
 		// Patch material parameter to not have to change SetGBufferForShadingModel for now
 		MaterialParameters.WorldNormal = Export.WorldNormal;
@@ -1812,7 +1915,7 @@ void FPixelShaderInOut_MainPS(
 			Export.Roughness,
 			Export.Anisotropy,
 			Export.SubsurfaceColor,
-			Export.SubsurfaceProfileID,
+			Export.SubsurfaceProfileIDFloat,
 			Dither,
 			Export.ShadingModelID
 			);
@@ -1836,7 +1939,8 @@ void FPixelShaderInOut_MainPS(
 		}
 	#endif
 
-		if (MATERIAL_SUBSTRATE_OPAQUE_PRECOMPUTED_LIGHTING && GBuffer.ShadingModelID != SHADINGMODELID_UNLIT)
+		// Water currently takes the legacy path for forward shading, so we need to skip it here so we don't apply this term twice
+		if (MATERIAL_SUBSTRATE_OPAQUE_PRECOMPUTED_LIGHTING && GBuffer.ShadingModelID != SHADINGMODELID_UNLIT && SUBSTRATE_INLINE_SINGLELAYERWATER == 0)
 		{
 			float3 InputBentNormal = MaterialParameters.WorldNormal;
 			// Clear Coat Bottom Normal
@@ -1850,12 +1954,12 @@ void FPixelShaderInOut_MainPS(
 			float3 DiffuseDir = ShadingOcclusion.BentNormal;
 			float3 DiffuseColorForIndirect = GBuffer.DiffuseColor;
 
-			// cel
-			// Remove SubsurfaceColor
-			if (GBuffer.ShadingModelID == SHADINGMODELID_SUBSURFACE)
+			// CelLit - it works on substrate, and CelLit doesn't support substrate.
+			if (GBuffer.ShadingModelID == SHADINGMODELID_SUBSURFACE || GBuffer.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN || GBuffer.ShadingModelID == SHADINGMODELID_CLOTH)
 			{
 				DiffuseColorForIndirect += SubsurfaceColor;
 			}
+
 			if (GBuffer.ShadingModelID == SHADINGMODELID_HAIR)
 			{
 			#if USE_HAIR_COMPLEX_TRANSMITTANCE
@@ -1889,11 +1993,16 @@ void FPixelShaderInOut_MainPS(
 			Color += (DiffuseIndirectLighting * DiffuseColorForIndirect + SubsurfaceIndirectLighting * SubsurfaceColor) * AOMultiBounce(GBuffer.BaseColor, ShadingOcclusion.DiffOcclusion);
 		}
 
-#else // SUBTRATE_GBUFFER_FORMAT==0
+#else // SUBSTRATE_GBUFFER_FORMAT==0
+
+		if (!bQuadShadingEnabled)
+		{
+			QuadPixelPos = PixelPos;
+		}
 
 		// Generate the Substrate material data to write out
 		FSubstrateAddressing SubstrateAddressing = GetSubstratePixelDataByteOffset(PixelPos, uint2(ResolvedView.BufferSizeAndInvSize.xy), SubstrateStruct.MaxBytesPerPixel);
-		FRWSubstrateMaterialContainer RWSubstrateMaterialContainer = InitialiseRWSubstrateMaterialContainer(SubstrateStruct.MaterialTextureArrayUAVWithoutRTs, QuadPixelWriteMask);
+		FRWSubstrateMaterialContainer RWSubstrateMaterialContainer = InitialiseRWSubstrateMaterialContainer(SubstrateStruct.MaterialTextureArrayUAVWithoutRTs, QuadPixelWriteMask, QuadPixelPos);
 		PackSubstrateOut(
 			RWSubstrateMaterialContainer,
 			SubstrateStruct.MaterialTextureArrayUAVWithoutRTs,
@@ -1931,7 +2040,7 @@ void FPixelShaderInOut_MainPS(
 		if (QuadPixelWriteMask>0)
 		{
 			const float3 OpaqueRefractionData = SubstratePackOpaqueRoughRefractionData(OpaqueRoughRefractionData);
-			WriteDataToBuffer(SubstrateStruct.OpaqueRoughRefractionTextureUAV, OpaqueRefractionData, PixelPos, QuadPixelWriteMask);
+			WriteDataToBuffer(SubstrateStruct.OpaqueRoughRefractionTextureUAV, OpaqueRefractionData, PixelPos, QuadPixelWriteMask, QuadPixelPos);
 		}
 	#endif
 
@@ -1941,16 +2050,16 @@ void FPixelShaderInOut_MainPS(
 		{
 			// Subsurface header
 			{
-				SubstrateStoreSubsurfaceHeader(SubstrateStruct.MaterialTextureArrayUAVWithoutRTs, SubstrateStruct.FirstSliceStoringSubstrateSSSDataWithoutMRT, PixelPos, SSSData.Header.Bytes, QuadPixelWriteMask);
+				SubstrateStoreSubsurfaceHeader(SubstrateStruct.MaterialTextureArrayUAVWithoutRTs, SubstrateStruct.FirstSliceStoringSubstrateSSSDataWithoutMRT, PixelPos, SSSData.Header.Bytes, QuadPixelWriteMask, QuadPixelPos);
 			}
 			// Subsurface data
 			if (SubstrateSubSurfaceHeaderHasExtras(SSSData.Header))
 			{
-				SubstrateStoreSubsurfaceExtras(SubstrateStruct.MaterialTextureArrayUAVWithoutRTs, SubstrateStruct.FirstSliceStoringSubstrateSSSDataWithoutMRT, PixelPos, SSSData.Extras.Bytes, QuadPixelWriteMask);
+				SubstrateStoreSubsurfaceExtras(SubstrateStruct.MaterialTextureArrayUAVWithoutRTs, SubstrateStruct.FirstSliceStoringSubstrateSSSDataWithoutMRT, PixelPos, SSSData.Extras.Bytes, QuadPixelWriteMask, QuadPixelPos);
 			}
 		}
 
-#endif // SUBTRATE_GBUFFER_FORMAT==0
+#endif // SUBSTRATE_GBUFFER_FORMAT==0
 
 		// Unlit view mode
 	#if USE_DEVELOPMENT_SHADERS
@@ -2112,6 +2221,12 @@ void FPixelShaderInOut_MainPS(
 			DualBlendSurfaceCoverage = GetMaterialOpacity(PixelMaterialInputs);
 		#endif
 
+			// Additive surfaces should not add any fog color contribution. They should only be attenuated according to fog transmittance.
+			// This must be enforced here since coverage can be used to weight the emissive color.
+		#if SUBSTRATE_OPTIMIZED_UNLIT && MATERIALBLENDING_ADDITIVE
+			Fogging.rgb = 0;
+		#endif
+
 			// Add fog luminance according to surfacecoverage and reduce surface luminance according to fog coverage.
 			float3 AdjustedDualBlendAdd = DualBlendSurfaceCoverage * Fogging.rgb + Fogging.a * DualBlendSurfaceLuminancePostCoverage;
 			// Fade the surface color transmittance out to 1 according to the surface coverage, and take into account the fog coverage to the surface.
@@ -2190,6 +2305,7 @@ void FPixelShaderInOut_MainPS(
 		float QuantizationBias = PseudoRandom( MaterialParameters.SvPosition.xy ) - 0.5f;
 
 		GBuffer.IndirectIrradiance = IndirectIrradiance;
+		GBuffer.NormalDistribution = 0.0f;
 
 		// this is the new encode, the older encode is the #else, keeping it around briefly until the new version is confirmed stable.
 		#if 1
@@ -2206,7 +2322,7 @@ void FPixelShaderInOut_MainPS(
 
 			EncodeGBufferToMRT(Out, GBuffer, QuantizationBias);
 
-			if (GBuffer.ShadingModelID == SHADINGMODELID_UNLIT && !SUBSTRATE_ENABLED) // Do not touch what Substrate outputs
+			if (GBuffer.ShadingModelID == SHADINGMODELID_UNLIT && (!SUBSTRATE_ENABLED || SUBSTRATE_GBUFFER_FORMAT==0)) // Do not touch what Substrate outputs with Format=1
 			{
 				Out.MRT[1] = 0;
 				SetGBufferForUnlit(Out.MRT[2]);
@@ -2220,17 +2336,26 @@ void FPixelShaderInOut_MainPS(
 			// This is used to apply distance field shadows or light function to the main directional light.
 			// Substrate also writes it through MRT because this is faster than through UAV.
 			#if SUBSTRATE_ENABLED && SUBSTRATE_INLINE_SINGLELAYERWATER
-				#if SUBTRATE_GBUFFER_FORMAT==1
+				#if SUBSTRATE_GBUFFER_FORMAT==1
 				Out.MRT[(GBUFFER_HAS_VELOCITY ? 2 : 1) + (GBUFFER_HAS_PRECSHADOWFACTOR ? 1 : 0)] = float4(SeparatedWaterMainDirLightLuminance * View.PreExposure, 1.0f);
 				#else
-				Out.MRT[(GBUFFER_HAS_VELOCITY ? 6 : 5) + (GBUFFER_HAS_PRECSHADOWFACTOR ? 1 : 0)] = float4(SeparatedWaterMainDirLightLuminance * View.PreExposure, 1.0f);
+				Out.MRT[(GBUFFER_HAS_VELOCITY ? 5 : 4)] = float4(SeparatedWaterMainDirLightLuminance * View.PreExposure, 1.0f);
 				#endif
 			#else
 			if (GBuffer.ShadingModelID == SHADINGMODELID_SINGLELAYERWATER)
 			{
-				Out.MRT[(GBUFFER_HAS_VELOCITY ? 6 : 5) + (GBUFFER_HAS_PRECSHADOWFACTOR ? 1 : 0)] = float4(SeparatedWaterMainDirLightLuminance * View.PreExposure, 1.0f);
+				Out.MRT[(GBUFFER_HAS_VELOCITY ? 5 : 4)] = float4(SeparatedWaterMainDirLightLuminance * View.PreExposure, 1.0f);
 			}
 			#endif
+		#endif
+
+			Out.SGGX = 0.0f;
+		#if NANITE_USE_ANALYTIC_SGGX && IS_NANITE_PASS && MATERIAL_SHADINGMODEL_TWOSIDED_FOLIAGE
+			if (GBuffer.ShadingModelID == SHADINGMODELID_TWOSIDED_FOLIAGE)
+			{
+				GBuffer.NormalDistribution = MaterialParameters.NormalDistribution;
+				Out.SGGX = float4(EncodeNormal(GBuffer.NormalDistribution), 1.0f);
+			}
 		#endif
 		}
 		#else
@@ -2388,11 +2513,11 @@ void FPixelShaderInOut_MainPS(
 #if SUPPORT_MATERIAL_PRIMITIVE_ALPHA_HOLDOUT
 		
 	//Calculate IoR for translucent material with ior and update holdout property
-	#if (MATERIALBLENDING_TRANSLUCENT || SUBSTRATE_TRANSLUCENT_MATERIAL) && REFRACTION_USE_INDEX_OF_REFRACTION
-		#if REFRACTION_ROOT_NODE_OVERRIDES_DEFAULT
+	#if (MATERIALBLENDING_TRANSLUCENT || SUBSTRATE_TRANSLUCENT_MATERIAL) && (REFRACTION_USE_INDEX_OF_REFRACTION || REFRACTION_USE_INDEX_OF_REFRACTION_FROM_F0)
+		#if REFRACTION_USE_INDEX_OF_REFRACTION
 			FMaterialRefractionData RefractionData = GetMaterialRefraction(PixelMaterialInputs);
 			float MaterialIOR = GetMaterialRefractionIOR(RefractionData);
-		#else
+		#else // REFRACTION_USE_INDEX_OF_REFRACTION_FROM_F0
 			float MaterialIOR = DielectricF0RGBToIor(ComputeF0(Specular, BaseColor, Metallic));
 		#endif
 		

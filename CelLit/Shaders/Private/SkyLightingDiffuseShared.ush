@@ -104,8 +104,7 @@ float3 SkyLightDiffuse(FGBufferData GBuffer, float AmbientOcclusion, float2 Buff
 		Lighting += SkyVisData.SkyDiffuseLookUpMul * SubsurfaceLookup * SubsurfaceColor;
 	}
 
-	// cel -shjh3117-
-	// Remove SubsurfaceData
+	// CelLit
 	if (GBuffer.ShadingModelID == SHADINGMODELID_SUBSURFACE)
 	{
 		float3 SubsurfaceColor = ExtractSubsurfaceColor(GBuffer);
@@ -122,12 +121,22 @@ float3 SkyLightDiffuse(FGBufferData GBuffer, float AmbientOcclusion, float2 Buff
 		SkyVisData.SkyDiffuseLookUpNormal = L;
 	}
 
+	// CelLit
+	// if (GBuffer.ShadingModelID == SHADINGMODELID_CLOTH)
+	// {
+	// 	float3 ClothFuzz = ExtractSubsurfaceColor(GBuffer);
+	// 	DiffuseColor += ClothFuzz * GBuffer.CustomData.a;
+	// }
+
 	// Compute the preconvolved incoming lighting with the bent normal direction
 	float3 DiffuseLookup = GetSkySHDiffuse(SkyVisData.SkyDiffuseLookUpNormal) * View.SkyLightColor.rgb;
 
 	// And accumulate the lighting
 	Lighting += (SkyVisData.SkyDiffuseLookUpMul * DiffuseLookup + SkyVisData.SkyDiffuseLookUpAdd) * DiffuseColor * DiffuseWeight;
+
+#if FEATURE_LEVEL > FEATURE_LEVEL_ES3_1
 	Lighting *= View.PreExposure;
+#endif
 
 	//Lighting = (Texture2DSampleLevel(BentNormalAOTexture, BentNormalAOSampler, UV, 0).xyz);
 

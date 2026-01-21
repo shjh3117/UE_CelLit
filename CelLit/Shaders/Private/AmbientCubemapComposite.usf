@@ -4,6 +4,13 @@
 	PostprocessAmbient.usf: To apply a ambient cubemap as a postprocess
 =============================================================================*/
 
+#define APPLY_SKY_SHADOWING 0
+#define USE_DEFAULT_ENV_LIGHTING_INPUT 0
+#define USE_SUBSTRATE_ENV_LIGHTING_COMMON 1
+//#define ENABLE_DYNAMIC_SKY_LIGHT 1
+#define ENABLE_DYNAMIC_SKY_LIGHT 0
+#define ENABLE_SIMPLE_ENV_LIGHT 1
+
 #include "Common.ush"
 #include "PostProcessCommon.ush"
 #include "DeferredShadingCommon.ush"
@@ -19,7 +26,7 @@
 Texture2D AmbientOcclusionTexture;
 SamplerState AmbientOcclusionSampler;
 
-#if SUBTRATE_GBUFFER_FORMAT==1
+#if SUBSTRATE_ENABLED
 
 // Override the default lighting input used for the env. lighting to sample the 'custom composite env. lighting'
 float3 GetEnvDiffuseLighting(float3 InBentNormal)
@@ -43,17 +50,15 @@ float3 GetEnvSpecularLighting(
 	return TextureCubeSampleLevel(AmbientCubemap, AmbientCubemapSampler, SpecularDirection, SpecularMip).rgb * AmbientCubemapColor.rgb;
 }
 
-#define APPLY_SKY_SHADOWING 0
-#define USE_DEFAULT_ENV_LIGHTING_INPUT 0
-#define USE_SUBSTRATE_ENV_LIGHTING_COMMON 1
-
 #include "ReflectionEnvironmentShared.ush"
+#include "SkyLightingDiffuseShared.ush"
 #include "Substrate/Substrate.ush"
 #include "Substrate/SubstrateEvaluation.ush"
 #include "Substrate/SubstrateLightingCommon.ush"
+#include "Substrate/SubstrateRead.ush"
 
 void MainPS(
-	float4 SvPosition : SV_POSITION, 
+	in float4 SvPosition : SV_POSITION,
 	out float4 OutColor : SV_Target0
 	#if SUBSTRATE_OPAQUE_ROUGH_REFRACTION_ENABLED
 	, out float3 OutOpaqueRoughRefractionSceneColor : SV_Target1
@@ -71,10 +76,18 @@ void MainPS(
 	OutSubSurfaceSceneColor = 0.0f;
 #endif
 
+	#if SUBSTRATE_LOAD_FROM_MATERIALCONTAINER
 	FSubstrateAddressing SubstrateAddressing = GetSubstratePixelDataByteOffset(PixelPos, uint2(View.BufferSizeAndInvSize.xy), Substrate.MaxBytesPerPixel);
 	FSubstratePixelHeader SubstratePixelHeader = UnpackSubstrateHeaderIn(Substrate.MaterialTextureArray, SubstrateAddressing, Substrate.TopLayerTexture);
+	const bool bMaterialIsLit = SubstratePixelHeader.ClosureCount > 0;	// This test is also enough to exclude sky pixels
+	#else
+	FScreenSpaceData ScreenSpaceData = GetScreenSpaceData(BufferUV, true);
+	const FGBufferData GBuffer = ScreenSpaceData.GBuffer;
+	const bool bMaterialIsLit = GBuffer.ShadingModelID != SHADINGMODELID_UNLIT;
+	#endif
+
 	BRANCH
-	if (SubstratePixelHeader.ClosureCount > 0) // This test is also enough to exclude sky pixels
+	if (bMaterialIsLit)
 	{
 		float DeviceZ = SampleDeviceZFromSceneTextures(BufferUV);
 		float SceneDepth = ConvertFromDeviceZ(DeviceZ);
@@ -89,13 +102,25 @@ void MainPS(
 		const FSubstrateIntegrationSettings Settings = InitSubstrateIntegrationSettings(false /*bForceFullyRough*/, Substrate.bRoughDiffuse, Substrate.PeelLayersAboveDepth, Substrate.bRoughnessTracking);
 		FSubstrateDeferredLighting SubstrateLighting = GetInitialisedSubstrateDeferredLighting();
 
-		const float CombinedScreenAndMaterialAO = SubstrateGetAO(SubstratePixelHeader) * AmbientOcclusion;
-
+		#if SUBSTRATE_LOAD_FROM_MATERIALCONTAINER
 		Substrate_for (uint ClosureIndex = 0, ClosureIndex < SubstratePixelHeader.ClosureCount, ++ClosureIndex)
+		#else
+		uint ClosureIndex = 0;
+		#endif
 		{
+			#if SUBSTRATE_LOAD_FROM_MATERIALCONTAINER
 			FSubstrateBSDF BSDF = UnpackSubstrateBSDF(Substrate.MaterialTextureArray, SubstrateAddressing, SubstratePixelHeader);
 			FSubstrateBSDFContext SubstrateBSDFContext = SubstrateCreateBSDFContext(SubstratePixelHeader, BSDF, SubstrateAddressing, V);
-			const float3 BSDFThroughput = LuminanceWeight(SubstrateBSDFContext, BSDF); // Use the reflected direction
+			float CombinedScreenAndMaterialAO = SubstrateGetAO(SubstratePixelHeader) * AmbientOcclusion;
+			FSubstrateIrradianceAndOcclusion SubstrateIrradianceAndOcclusion = SubstrateGetIrradianceAndAO(SubstratePixelHeader);
+			#else
+			FSubstrateGBufferBSDF GBufferBSDF = SubstrateReadGBufferBSDF(ScreenSpaceData);
+			FSubstrateBSDFContext SubstrateBSDFContext = SubstrateCreateBSDFContext(GBufferBSDF.BSDFTangentBasis, GBufferBSDF.BSDF, V, V/*L*/, false/*bHasValidL*/);
+			float CombinedScreenAndMaterialAO = GBufferBSDF.BSDFAO;
+			FSubstrateIrradianceAndOcclusion SubstrateIrradianceAndOcclusion = SubstrateGetIrradianceAndAO(ScreenSpaceData.GBuffer);
+			#endif
+
+			const float3 BSDFThroughput = LuminanceWeight(SubstrateBSDFContext, SubstrateBSDFContext.BSDF); // Use the reflected direction
 
 			// Evaluate environment lighting
 			FSubstrateEnvLightResult SubstrateEnvLight = SubstrateEvaluateForEnvLight(SubstrateBSDFContext, true /*bEnableSpecular*/, Settings);
@@ -104,9 +129,9 @@ void MainPS(
 			float3 SpecularLighting = 0;
 			SubstrateEnvLightingCommon(
 				SubstrateEnvLight,
-				SubstratePixelHeader,
+				SubstrateIrradianceAndOcclusion,
 				SubstrateBSDFContext,
-				BSDF,
+				SubstrateBSDFContext.BSDF,
 				SubstrateEnvLight.DiffuseNormal,
 				BSDFThroughput,
 				0 /*CaptureDataStartIndex*/,
@@ -120,8 +145,8 @@ void MainPS(
 				SpecularLighting);
 
 			FLightAccumulator Out = (FLightAccumulator)0;
-			LightAccumulator_AddSplit(Out, DiffuseLighting, SpecularLighting, DiffuseLighting, View.PreExposure, SubstrateEnvLight.bPostProcessSubsurface);
-			AccumulateSubstrateDeferredLighting(SubstrateLighting, Out, SubstrateEnvLight.bPostProcessSubsurface, BSDF_GETISTOPLAYER(BSDF));
+			LightAccumulator_AddSplit(Out, DiffuseLighting, SpecularLighting, DiffuseLighting, 1.f/*Legacy does not apply View.PreExposure*/, SubstrateEnvLight.bPostProcessSubsurface);
+			AccumulateSubstrateDeferredLighting(SubstrateLighting, Out, SubstrateEnvLight.bPostProcessSubsurface, BSDF_GETISTOPLAYER(SubstrateBSDFContext.BSDF));
 		}
 
 		OutColor += SubstrateLighting.SceneColor;
@@ -132,7 +157,7 @@ void MainPS(
 	}
 }
 
-#else // SUBTRATE_GBUFFER_FORMAT==1
+#else // SUBSTRATE_ENABLED
 
 float3 DiffuseIBL( uint2 Random, float3 DiffuseColor, float Roughness, float3 N, float3 V )
 {
@@ -439,8 +464,14 @@ float3 ImageBasedLightingHair( FGBufferData GBuffer, float3 V, float3 N, uint2 R
 	return Lighting;
 }
 
-void MainPS(in noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPosition : SV_POSITION, out float4 OutColor : SV_Target0)
+void MainPS(
+	in noperspective float4 UVAndScreenPos : TEXCOORD0, 
+	in FStereoPSInput StereoInput,
+	in float4 SvPosition : SV_POSITION,
+	out float4 OutColor : SV_Target0)
 {
+	StereoSetupPS(StereoInput);
+
 	float2 BufferUV = UVAndScreenPos.xy;
 	float2 ScreenSpacePos = UVAndScreenPos.zw;
 	int2 PixelPos = int2(SvPosition.xy);
@@ -569,8 +600,7 @@ void MainPS(in noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPositio
 	float AmbientOcclusion = GBuffer.GBufferAO * AmbientOcclusionTexture.SampleLevel(AmbientOcclusionSampler, BufferUV, 0).r;
 
 	// Subsurface
-	// cel -shjh3117-
-	// Remove SubsurfaceColor
+	// CelLit
 	BRANCH if(GBuffer.ShadingModelID == SHADINGMODELID_SUBSURFACE)
 	{
 		// some view dependent and some non view dependent (hard coded)
@@ -594,4 +624,4 @@ void MainPS(in noperspective float4 UVAndScreenPos : TEXCOORD0, float4 SvPositio
 
 	OutColor *= AmbientOcclusion;
 }
-#endif // SUBTRATE_GBUFFER_FORMAT==1
+#endif // SUBSTRATE_ENABLED
