@@ -411,6 +411,7 @@ void MainPS(
 				DiffuseIndirectLighting = pow(DiffuseIndirectLighting, 0.9f);
 
 				// CelLit
+				/*
 				if (Material.GBufferData.ShadingModelID == SHADINGMODELID_PREINTEGRATED_SKIN)
 				{
 					float luma = max(0.0f, dot(DiffuseIndirectLighting, float3(0.299f, 0.587f, 0.114f)));
@@ -422,6 +423,7 @@ void MainPS(
 					
 					DiffuseIndirectLighting *= scale;
 				}
+				*/
 
 				
 
