@@ -39,6 +39,7 @@ public class CelLit : ModuleRules
 				"Slate",
 				"SlateCore",
                 "Projects",
+                "RenderCore",
 				// ... add private dependencies that you statically link with here ...	
 			}
 			);
