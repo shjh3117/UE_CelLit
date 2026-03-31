@@ -22,7 +22,7 @@ It consists of two parts:
   - suppressing facial self-occlusion with Unreal Engine's VSM-based transmission simulation
   - restoring the lost hair occlusion through separate capture, blur, and application to the **Face Material Opacity**
 
-- The public repository record for the January 2026 stage begins from commit `079084f8fa46bf5cdc9f03c1316dd37ecb133d9b`, dated **January 22, 2026 (+0900)**. :contentReference[oaicite:0]{index=0}
+- The public repository record for the January 2026 stage begins from commit `079084f8fa46bf5cdc9f03c1316dd37ecb133d9b`, dated **January 22, 2026 (+0900)**.
 
 ### Note
 To the best of my knowledge, this repository is the first public documentation of this specific approach in Unreal Engine:
