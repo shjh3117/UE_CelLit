@@ -1,3 +1,4 @@
+<del>
 ## Public record of the method
 
 This repository documents the development history of a stylized facial shadowing approach in Unreal Engine.
@@ -27,3 +28,4 @@ It consists of two parts:
 ### Note
 To the best of my knowledge, this repository is the first public documentation of this specific approach in Unreal Engine:
 suppressing facial self-occlusion with VSM-based transmission simulation while reconstructing lost hair occlusion separately for stylized facial shadow control.
+</del>

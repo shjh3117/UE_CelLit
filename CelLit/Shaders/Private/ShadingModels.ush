@@ -1089,7 +1089,34 @@ FDirectLighting PreintegratedSkinBxDF( FGBufferData GBuffer, half3 N, half3 V, F
 	float UseExclusiveHairHighlight = Bit_3;
 	float UseExclusiveEyeHighlight = Bit_2; 
 	float UseSubNormal = Bit_4;
-	
+    float IsHair = Bit_7;
+    
+    // Hair Occlusion
+    float DepthScale = saturate(50.0f / max(GBuffer.Depth, 1.0f));
+    float NoV = saturate(dot(N, V));
+    float ProjectionStrength = smoothstep(0.5f, 1.0f, NoV);
+    float LightProjectionScale = 0.05f * DepthScale * ProjectionStrength;
+    float3 LView = mul(View.TranslatedWorldToView, float4(AreaLight.DiffuseL, 0.0f)).xyz;
+    LView = normalize(LView);
+    float Aspect = View.ViewSizeAndInvSize.x * View.ViewSizeAndInvSize.w;
+    float2 LightFactor = float2(LView.x, -LView.y);
+    float HorizontalLightStrength = 1.0f;
+    float VerticalLightStrength = 0.5f;
+    float2 LightOffset =
+        float2(
+            (LightFactor.x * HorizontalLightStrength) / Aspect,
+            -LightFactor.y * VerticalLightStrength
+        ) * LightProjectionScale;
+    float2 CenterViewportUV = saturate(GBuffer.ViewportUV + LightOffset);
+    float HairOcclusion = 0.0f;
+    float2 SampleUV0 = saturate(CenterViewportUV);
+    int2 SamplePixel0 = int2(SampleUV0 * View.ViewSizeAndInvSize.xy + View.ViewRectMin.xy);
+    float SampleCustomDataX = SceneTexturesStruct.GBufferDTexture.Load(int3(SamplePixel0, 0)).r;
+    uint SampleCode = (uint)round(saturate(SampleCustomDataX) * 255.0f);
+    HairOcclusion = 1 - (float)((SampleCode >> 7) & 1u);
+    HairOcclusion = max(HairOcclusion, IsHair);
+    HairOcclusion = max(HairOcclusion, pow(Shadow.SurfaceShadow, 9.0f));
+        
 	// Diffuse term
 	// UseLambertTerm and UseDescretSurfaceShadow
 	float CelNoL = step(0.0f, NoL);
@@ -1099,7 +1126,7 @@ FDirectLighting PreintegratedSkinBxDF( FGBufferData GBuffer, half3 N, half3 V, F
 	float SubCelNoL = step(0.0f, SubNoL);
 	SubCelNoL = lerp(1, SubCelNoL, UseSubNormal);
 	float LambertTerm = CelNoL * SubCelNoL;
-	float SurfaceShadowTerm = lerp(Shadow.SurfaceShadow, step(0.625f, Shadow.SurfaceShadow), UseDescretSurfaceShadow);
+	float SurfaceShadowTerm = lerp(Shadow.SurfaceShadow * HairOcclusion, step(0.625f, Shadow.SurfaceShadow * HairOcclusion), UseDescretSurfaceShadow);
 
 	// Specular term
 	// UseSpecular or UseExclusiveHairHighlight
@@ -1109,14 +1136,14 @@ FDirectLighting PreintegratedSkinBxDF( FGBufferData GBuffer, half3 N, half3 V, F
 	float a2 = Pow4(GBuffer.Roughness);
 	float DPeak = 1.0 / (PI * max(a2, 0.001));
 
-	// 1. Standard Toon Specular (Normal based)
+	// Standard Toon Specular (Normal based)
 	// D_GGX based on NoH
 	float D_Std = D_GGX(a2, Context.NoH);
 	float DNorm_Std = saturate(D_Std / DPeak);
 	float ToonD_Std = step(0.5, DNorm_Std);
 	float3 SpecTerm = GBuffer.SpecularColor * ToonD_Std * Intensity;
 
-	// 2. Hair Toon Highlight (Tangent based, Kajiya-Kay)
+	// Hair Toon Highlight (Tangent based, Kajiya-Kay)
 	float3 T = CustomDirection;
 	float3 B = cross(N, T);
 	float TangentShift = 0.2; // hard coded
@@ -1131,16 +1158,13 @@ FDirectLighting PreintegratedSkinBxDF( FGBufferData GBuffer, half3 N, half3 V, F
 	float ToonD_Hair = step(0.5, DNorm_Hair);
 	float3 HairSpecTerm = GBuffer.SpecularColor * ToonD_Hair * Intensity;
 
-	// 3. Eye Toon Highlight (Branchless)
+	// Eye Toon Highlight (Branchless)
 	float2 CenterUV = float2(GBuffer.CustomData.y, GBuffer.CustomData.z);
-	
 	// Screen Edge Check: Remove highlight if CenterUV is outside viewport (0-1)
 	// GBuffer might clamp values to 0~1, causing "sticky" artifacts at the edge.
-	// We apply a safe margin (0.02) to mask out these clamped values.
 	float EdgeMargin = 0.02f;
 	float2 ScreenEdgeMask2 = step(EdgeMargin, CenterUV) * step(CenterUV, 1.0f - EdgeMargin);
 	float ScreenEdgeMask = ScreenEdgeMask2.x * ScreenEdgeMask2.y;
-
 	float2 PixelUV = GBuffer.ViewportUV;
 	float EyeDepth = GBuffer.Depth; 
 	float ScaleFactor = 50.0f / max(EyeDepth, 1.0f); 
@@ -1182,9 +1206,7 @@ FDirectLighting PreintegratedSkinBxDF( FGBufferData GBuffer, half3 N, half3 V, F
 	EyeSpecTerm *= saturate(NoL) + 0.01f;
 	EyeSpecTerm *= lerp(1.0f, 0.55f, EyeRoughness);
 	EyeSpecTerm *= SurfaceShadowTerm;
-
-	// EyeSpecTerm *= EyeStableMask; // REMOVED: User confirmed material slots are separate.
-	// Select Specular Mode (Branchless)
+	// EyeSpecTerm
 	float3 BaseSpec = lerp(SpecTerm, HairSpecTerm, UseExclusiveHairHighlight);
 	float3 ShadowedSpec = BaseSpec * SurfaceShadowTerm * LambertTerm;
 	float3 FinalSpec = lerp(ShadowedSpec, EyeSpecTerm, UseExclusiveEyeHighlight);
