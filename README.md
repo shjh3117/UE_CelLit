@@ -37,3 +37,5 @@ An individually developed project focusing on stylized rendering.
 
 
 ## Notes
+- Please Turn off Substrate Material in Project Settings
+- It was tested on a MacBook Air (M4).
