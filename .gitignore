@@ -1,3 +1,8 @@
-CelLit/Shaders/Temp/.DS_Store
 .DS_Store
 CelLit/Shaders/Temp/
+
+# Unreal build/generated files
+CelLit/Binaries/
+CelLit/Intermediate/
+CelLit/Saved/
+CelLit/DerivedDataCache/
