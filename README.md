@@ -19,17 +19,17 @@ An individually developed project focusing on stylized rendering.
 
 ## Features
 
-### Support Direction Light and Local Lights
+- Support Direction Light and Local Lights
 <img width="513" height="513" alt="Direction Light and Local Lights" src="https://github.com/user-attachments/assets/077770e0-ea57-47f9-b962-0aaa62f3939f" />
 
-### Support Lumen GI
+- Support Lumen GI
 <img width="513" height="513" alt="Lumen GI" src="https://github.com/user-attachments/assets/9ffe03fd-7709-45d9-a56f-cf544e2c52fa" />
 
-### Projected Hair Shadow
+- Projected Hair Shadow
 
-### Toon Style Hiar Highlight
+- Toon Style Hiar Highlight
 
-### Toon Style Eye Highlight
+- Toon Style Eye Highlight
 
 
 ## Change Log
