@@ -1,7 +1,7 @@
 An individually developed project focusing on stylized rendering.
 
 # **Custom stylized shader plugin for Unreal Engine 5.7.x**
-![ToonCharacterWithDynamicLight](https://github.com/user-attachments/assets/4c3f6504-bb71-42f1-a397-ec19dc4b5655)
+https://github.com/user-attachments/assets/c5684bb8-bc8e-4f75-a79a-8e4123d7cd17
 
 
 ## Supported
